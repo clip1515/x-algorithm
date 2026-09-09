@@ -1,3 +1,14 @@
+# AK.Ita X Algorithm Watch
+
+I track changes, pull requests, and issues in the public X algorithm repository.
+
+I verify what actually changed before I post.
+
+- X: [@ts_nyan_watch](https://x.com/ts_nyan_watch)
+- note: [AK.Ita](https://note.com/akita_watch)
+
+---
+
 # X For You Feed Algorithm
 
 This repository contains the core code that determines which posts a viewer sees in the **For You** feed on X. It combines in-network content (from accounts the viewer follows) with out-of-network content (discovered through ML-based retrieval and other mechanisms), filters content based on a variety of inputs, and ranks posts using a transformer model.
