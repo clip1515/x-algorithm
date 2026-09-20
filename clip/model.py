@@ -115,7 +115,7 @@ class TwitterCLIP:
             )
             print(f"loading model from: {local_model_path}")
             checkpoint_contents = torch.load(
-                local_model_path, map_location=map_location
+                local_model_path, map_location=map_location, weights_only=True
             )
 
             config = checkpoint_contents["config"]
