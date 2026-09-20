@@ -1,0 +1,36 @@
+name: CodeQL
+
+# Static analysis for the Python sources in this mirror. Scoped to Python
+# only: the Scala/Java/Rust code here is built with internal Bazel/Cargo
+# tooling this fork can't reproduce in CI, and CodeQL's compiled-language
+# analysis needs a real build. Python analysis works source-only, so it's
+# the one language we can safely scan without a build step.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "0 7 * * 1" # weekly, Monday 07:00 UTC
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: python
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:python"

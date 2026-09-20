@@ -1,0 +1,51 @@
+version: 2
+
+updates:
+  # Keep this fork's own CI actions patched.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+
+  # Python projects
+  - package-ecosystem: "pip"
+    directory: "/phoenix"
+    schedule:
+      interval: "weekly"
+    groups:
+      phoenix-python:
+        patterns:
+          - "*"
+
+  - package-ecosystem: "pip"
+    directory: "/bdsm"
+    schedule:
+      interval: "weekly"
+    groups:
+      bdsm-python:
+        patterns:
+          - "*"
+
+  # Rust workspaces
+  - package-ecosystem: "cargo"
+    directory: "/phoenix"
+    schedule:
+      interval: "weekly"
+    groups:
+      phoenix-cargo:
+        patterns:
+          - "*"
+
+  - package-ecosystem: "cargo"
+    directory: "/bdsm/rust/abuse-v3-features"
+    schedule:
+      interval: "weekly"
+
+  - package-ecosystem: "cargo"
+    directory: "/bdsm/rust/accumulator"
+    schedule:
+      interval: "weekly"
