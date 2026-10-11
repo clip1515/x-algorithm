@@ -36,10 +36,7 @@ jobs:
           fi
 
           BODY_FILE=$(mktemp)
-          cat > "$BODY_FILE" << 'EOF'
-@clip1515
-🔔 GitHub Mobileプッシュ通知テストです。Xアルゴリズムの実際の更新ではありません。
-EOF
+          printf '%s\n%s\n' "@clip1515" "🔔 GitHub Mobileプッシュ通知テストです。Xアルゴリズムの実際の更新ではありません。" > "$BODY_FILE"
 
           URL=$(gh issue comment "$ISSUE_NUMBER" --body-file "$BODY_FILE")
           echo "Posted comment: $URL"
