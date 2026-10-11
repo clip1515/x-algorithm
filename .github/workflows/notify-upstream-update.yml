@@ -60,11 +60,13 @@ jobs:
       - name: Read previously seen commit
         id: prev
         run: |
+          set -euo pipefail
           if [ -f "$STATE_FILE" ]; then
-            echo "sha=$(jq -r '.sha // \"\"' "$STATE_FILE")" >> "$GITHUB_OUTPUT"
+            PREV_SHA=$(jq -r '.sha // empty' "$STATE_FILE")
           else
-            echo "sha=" >> "$GITHUB_OUTPUT"
+            PREV_SHA=""
           fi
+          echo "sha=$PREV_SHA" >> "$GITHUB_OUTPUT"
 
       - name: Open notification issue
         if: steps.upstream.outputs.sha != steps.prev.outputs.sha && steps.prev.outputs.sha != ''
