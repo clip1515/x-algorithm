@@ -57,6 +57,7 @@ GITHUB_RUN_ID = os.environ.get("GITHUB_RUN_ID", "")
 # script's output.
 MOCK_ANTHROPIC_RESPONSE_FILE = os.environ.get("MOCK_ANTHROPIC_RESPONSE_FILE", "")
 MOCK_COMPARE_RESPONSE_FILE = os.environ.get("MOCK_COMPARE_RESPONSE_FILE", "")
+MOCK_SKIP_GH_ISSUE_CALLS = os.environ.get("MOCK_SKIP_GH_ISSUE_CALLS", "") == "true"
 
 GITHUB_OUTPUT = os.environ.get("GITHUB_OUTPUT")
 
@@ -442,7 +443,7 @@ def gh_api(method: str, path: str, token: str, body: dict | None = None) -> dict
         return json.loads(resp.read().decode("utf-8"))
 
 
-def alert_budget_exhausted_once(health: dict, month: str, compare_url: str) -> None:
+def alert_budget_exhausted_once(health: dict, month: str, compare_url: str) -> bool:
     """Create a plain (no-Claude-cost) Issue the first time the monthly
     budget is hit in a given month, so a human knows this specific commit
     range was NOT analyzed and may need manual review. Without this, a
@@ -451,16 +452,27 @@ def alert_budget_exhausted_once(health: dict, month: str, compare_url: str) -> N
     Rate-limited to once per month via health['budget_alert_sent_for_month']
     so every subsequent budget-exhausted run within the same month doesn't
     spam a new Issue.
+
+    Returns True if this call changed `health` (so the caller knows whether
+    a health-state write is needed), False if this month was already
+    alerted and nothing changed.
     """
     if health.get("budget_alert_sent_for_month") == month:
-        return
+        return False
+    if MOCK_SKIP_GH_ISSUE_CALLS:
+        print(
+            f"(mock) would create budget-exhaustion alert Issue for {month} "
+            f"(compare: {compare_url}) -- no real GitHub API call made"
+        )
+        health["budget_alert_sent_for_month"] = month
+        return True
     if not GITHUB_REPOSITORY:
         print(
             "GITHUB_REPOSITORY not set; cannot create budget-exhaustion alert Issue "
             "(this is expected in local/test runs).",
             file=sys.stderr,
         )
-        return
+        return False
 
     run_url = f"https://github.com/{GITHUB_REPOSITORY}/actions/runs/{GITHUB_RUN_ID}"
     title = f"⚠️ Claude分析の月間予算上限に到達しました ({month})"
@@ -490,6 +502,7 @@ def alert_budget_exhausted_once(health: dict, month: str, compare_url: str) -> N
         print(f"Failed to create budget-exhaustion alert Issue: {e}", file=sys.stderr)
 
     health["budget_alert_sent_for_month"] = month
+    return True
 
 
 def save_health_state(path: str, state: dict) -> None:
@@ -507,6 +520,20 @@ def append_audit_log(path: str, entry: dict) -> None:
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with open(path, "a", encoding="utf-8") as f:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+
+def write_health_mutation_output(mutation: str) -> None:
+    """Tells the calling workflow step which health-state mutation (if any)
+    needs to be persisted: 'none', 'success', or 'budget_alert:<month>'.
+    The YAML step applies this via bump_health_state.py, which is safe to
+    re-run against a freshly fetched base after a push retry -- unlike
+    re-running this whole script, which would make a second real Claude
+    API call.
+    """
+    if GITHUB_OUTPUT is None:
+        return
+    with open(GITHUB_OUTPUT, "a", encoding="utf-8") as f:
+        f.write(f"health_mutation={mutation}\n")
 
 
 def write_output(important: bool, fields: dict | None) -> None:
@@ -564,6 +591,7 @@ def main() -> int:
         )
         append_audit_log(AUDIT_LOG_FILE, audit_base)
         write_output(False, None)
+        write_health_mutation_output("none")
         print("Pre-filter: all changed files are trivial (docs/CI/tests). Skipping Claude call.")
         return 0
 
@@ -589,9 +617,10 @@ def main() -> int:
         # alert Issue creation costs nothing (no Claude call) and failing to
         # create it does not fail this step -- it's best-effort visibility
         # layered on top of the audit-log entry above, which always lands.
-        alert_budget_exhausted_once(health, month, compare["compare_url"])
+        alert_fired = alert_budget_exhausted_once(health, month, compare["compare_url"])
         # Not an error: this is an intentional, auditable skip, not a failure.
         save_health_state(HEALTH_STATE_FILE, health)
+        write_health_mutation_output(f"budget_alert:{month}" if alert_fired else "none")
         return 0
 
     diff_text, diff_truncated = build_diff_text(compare["files"], MAX_DIFF_CHARS)
@@ -624,6 +653,7 @@ def main() -> int:
     append_audit_log(AUDIT_LOG_FILE, audit_base)
 
     write_output(result["important"], result)
+    write_health_mutation_output("success")
     print(f"Claude analysis complete: important={result['important']}")
     return 0
 
