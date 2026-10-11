@@ -1,0 +1,12 @@
+{
+  "html_url": "https://github.com/xai-org/x-algorithm/commit/2a38187dbffa67ae1c81781db7e048a5f461ab13",
+  "total_commits": 1,
+  "commits": [{}],
+  "files": [
+    {
+      "filename": "home-mixer/candidate_hydrators/vf_candidate_hydrator.rs",
+      "status": "modified",
+      "patch": "@@ -83,6 +83,8 @@ impl Hydrator<ScoredPostsQuery, PostCandidate> for VFCandidateHydrator {\n             }\n         }\n \n+        in_network_ids.sort_unstable();\n+        in_network_ids.dedup();\n         oon_ids.sort_unstable();\n         oon_ids.dedup();\n"
+    }
+  ]
+}

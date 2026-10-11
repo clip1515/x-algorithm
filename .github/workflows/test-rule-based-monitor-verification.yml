@@ -26,9 +26,9 @@ env:
   AUDIT_LOG_FILE: .github/test-fixtures/audit-log.jsonl
   PREV_SHA: "aaaa111111111111111111111111111111111a"
   NEW_SHA: "bbbb222222222222222222222222222222222b"
-  MOCK_COMPARE_RESPONSE_FILE: .github/test-fixtures/compare_nomatch.json
+  MOCK_COMPARE_RESPONSE_FILE: .github/test-fixtures/compare_vf_real.json
   MOCK_SKIP_GH_ISSUE_CALLS: "true"
-  SCENARIO_LABEL: "C-no-category-match"
+  SCENARIO_LABEL: "D-real-upstream-vf-commit-2a38187"
 
 jobs:
   verify:
