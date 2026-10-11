@@ -8,16 +8,9 @@ name: "[TEST] Notify workflow verification (temporary, do not merge)"
 # This branch and file are deleted after verification; never merge this.
 
 on:
-  workflow_dispatch:
-    inputs:
-      seed_prev_sha:
-        description: "Force this value into the TEST state file before running (leave empty to reuse existing test state)"
-        required: false
-        default: ""
-      fail_issue_create:
-        description: "Simulate an Issue-creation API failure (true/false)"
-        required: false
-        default: "false"
+  push:
+    branches:
+      - test/notify-workflow-verification
 
 permissions:
   contents: write
@@ -26,6 +19,9 @@ permissions:
 env:
   UPSTREAM_REPO: xai-org/x-algorithm
   STATE_FILE: .github/test-upstream-state.json # TEST-ONLY file, never the production state file
+  # Edited per test scenario, then committed+pushed to trigger a run:
+  SEED_PREV_SHA: "0000000000000000000000000000000000dead"
+  FAIL_ISSUE_CREATE: "false"
 
 jobs:
   check-upstream:
@@ -35,11 +31,11 @@ jobs:
         uses: actions/checkout@v4
 
       - name: "(TEST SETUP) Seed previous SHA"
-        if: inputs.seed_prev_sha != ''
+        if: env.SEED_PREV_SHA != ''
         run: |
           set -euo pipefail
           mkdir -p "$(dirname "$STATE_FILE")"
-          jq -n --arg sha "${{ inputs.seed_prev_sha }}" \
+          jq -n --arg sha "$SEED_PREV_SHA" \
             '{sha: $sha, url: "test-seed", date: "test-seed", checked_at: "test-seed"}' \
             > "$STATE_FILE"
           git config user.name "test-harness"
@@ -113,7 +109,7 @@ jobs:
           echo "$COMMIT_MESSAGE"
           echo ">>>"
           echo "================================================================"
-          if [ "${{ inputs.fail_issue_create }}" = "true" ]; then
+          if [ "$FAIL_ISSUE_CREATE" = "true" ]; then
             echo "Simulating Issue-creation API failure..." >&2
             exit 1
           fi
