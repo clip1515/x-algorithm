@@ -9,6 +9,16 @@ on:
     - cron: "0 */6 * * *" # every 6 hours
   workflow_dispatch: {} # allow manual runs from the Actions tab
 
+# Serialize runs of this workflow. Without this, a manual workflow_dispatch
+# overlapping a scheduled run (or two scheduled runs if one runs long) can
+# race on the same git refs (upstream-state.json, monitor-health-state.json,
+# notify-audit-log.jsonl), causing a git push to fail non-fast-forward.
+# cancel-in-progress: false so an overlapping trigger queues instead of
+# killing an in-flight run partway through its Claude call / Issue creation.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
 permissions:
   contents: write
   issues: write
@@ -84,14 +94,65 @@ jobs:
 
       - name: Commit analysis bookkeeping (health state + audit log)
         if: steps.analyze.outcome == 'success'
+        # continue-on-error: a transient push race on this bookkeeping
+        # commit must never suppress the actual notification Issue below
+        # (which only depends on steps.analyze.outputs.important, not on
+        # this step's success) or block state advancement later in the job.
+        # The retry loop below is the primary defense against losing an
+        # audit-log entry to a push race; continue-on-error is the fallback
+        # if all retries are exhausted.
+        continue-on-error: true
+        env:
+          HEALTH_MUTATION: ${{ steps.analyze.outputs.health_mutation }}
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Capture the one audit-log line this run just appended (if any),
+          # so it can be re-applied verbatim after a reset+retry without
+          # re-invoking analyze_upstream_diff.py -- that would mean a
+          # second real Claude API call, which must never happen as a side
+          # effect of a git push retry.
+          AUDIT_LINE=""
+          if [ -s "$AUDIT_LOG_FILE" ]; then
+            AUDIT_LINE=$(tail -n 1 "$AUDIT_LOG_FILE")
+          fi
+
           git add "$HEALTH_STATE_FILE" "$AUDIT_LOG_FILE"
-          git diff --cached --quiet && echo "No analysis bookkeeping change to commit" && exit 0
+          if git diff --cached --quiet; then
+            echo "No analysis bookkeeping change to commit"
+            exit 0
+          fi
           git commit -m "chore: record Claude analysis outcome [skip ci]"
-          git push
+
+          for attempt in 1 2 3 4 5; do
+            if git push; then
+              exit 0
+            fi
+            echo "push failed (attempt $attempt/5); fetching the fresh base and re-deriving bookkeeping" >&2
+            # Deliberately git reset --hard (not rebase): a textual rebase
+            # of a stale counter-file edit onto a moved base can conflict
+            # even when the two writers' intent doesn't actually conflict
+            # (verified by direct test against a simulated concurrent
+            # write). Discarding and re-deriving the mutation fresh from
+            # whatever is now on the remote is correct and safe because
+            # bump_health_state.py never calls Claude or any paid API.
+            git fetch origin "$GITHUB_REF_NAME"
+            git reset --hard "origin/$GITHUB_REF_NAME"
+            python3 .github/scripts/bump_health_state.py "$HEALTH_MUTATION"
+            if [ -n "$AUDIT_LINE" ]; then
+              echo "$AUDIT_LINE" >> "$AUDIT_LOG_FILE"
+            fi
+            git add "$HEALTH_STATE_FILE" "$AUDIT_LOG_FILE"
+            if git diff --cached --quiet; then
+              echo "Nothing to recommit after resync"
+              exit 0
+            fi
+            git commit -m "chore: record Claude analysis outcome [skip ci]"
+          done
+          echo "Giving up on bookkeeping commit after 5 attempts; audit-log entry for this run was NOT pushed." >&2
+          exit 1
 
       - name: Open notification issue
         if: steps.upstream.outputs.sha != steps.prev.outputs.sha && steps.prev.outputs.sha != '' && steps.analyze.outputs.important == 'true'
@@ -149,9 +210,13 @@ jobs:
             echo "${SUMMARY_JA}"
             echo
             echo "**コミットメッセージ:**"
-            echo '```'
+            # 4-backtick fence: COMMIT_MESSAGE is untrusted external content
+            # (the upstream committer controls it) and could itself contain
+            # a 3-backtick sequence that would otherwise break out of the
+            # code block and let it render as arbitrary Markdown.
+            echo '````'
             echo "$COMMIT_MESSAGE"
-            echo '```'
+            echo '````'
             echo
             echo "> **注意:** これはコミットが検知されたことを示すものであり、Xの推薦アルゴリズムの実際の挙動が"
             echo "> 変わったことを保証するものではありません。上記のcompareリンクで実際の差分を確認してください。"
@@ -173,13 +238,46 @@ jobs:
           ALERT_THRESHOLD: "3"
         run: |
           set -euo pipefail
-          python3 .github/scripts/record_monitor_failure.py
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          python3 .github/scripts/record_monitor_failure.py
           git add "$HEALTH_STATE_FILE"
-          git diff --cached --quiet && echo "No health-state change to commit" && exit 0
+          if git diff --cached --quiet; then
+            echo "No health-state change to commit"
+            exit 0
+          fi
           git commit -m "chore: record Claude analysis failure [skip ci]"
-          git push
+
+          # A lost push here would silently under-count
+          # consecutive_claude_failures on the next run, delaying or
+          # skipping the alert threshold -- but a textual rebase of a
+          # stale counter-file edit onto a moved base can conflict even
+          # when the two writers' intent doesn't actually conflict
+          # (verified by direct test against a simulated concurrent
+          # write). So: discard (--hard reset, never rebase) and re-run
+          # the script fresh against whatever is actually on the remote.
+          # This is safe to repeat: the increment is always relative to
+          # the current on-disk value, and the alert Issue/comment this
+          # script creates is itself idempotent (finds-or-creates-or-
+          # comments), so retrying here cannot create a duplicate alert.
+          for attempt in 1 2 3 4 5; do
+            if git push; then
+              exit 0
+            fi
+            echo "push failed (attempt $attempt/5); fetching the fresh base and re-deriving the failure count" >&2
+            git fetch origin "$GITHUB_REF_NAME"
+            git reset --hard "origin/$GITHUB_REF_NAME"
+            python3 .github/scripts/record_monitor_failure.py
+            git add "$HEALTH_STATE_FILE"
+            if git diff --cached --quiet; then
+              echo "Nothing to recommit after resync"
+              exit 0
+            fi
+            git commit -m "chore: record Claude analysis failure [skip ci]"
+          done
+          echo "Giving up on failure-counter commit after 5 attempts." >&2
+          exit 1
 
       - name: Save latest seen commit
         if: steps.upstream.outputs.sha != steps.prev.outputs.sha

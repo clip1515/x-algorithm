@@ -22,12 +22,13 @@ env:
   UPSTREAM_REPO: xai-org/x-algorithm
   HEALTH_STATE_FILE: .github/test-fixtures/health-state.json
   AUDIT_LOG_FILE: .github/test-fixtures/audit-log.jsonl
-  PREV_SHA: "8888888888888888888888888888888888c33e"
-  NEW_SHA: "9999999999999999999999999999999999d44e"
-  MOCK_COMPARE_RESPONSE_FILE: .github/test-fixtures/compare_large.json
+  PREV_SHA: "aaaa111111111111111111111111111111111a"
+  NEW_SHA: "bbbb222222222222222222222222222222222b"
+  MOCK_COMPARE_RESPONSE_FILE: .github/test-fixtures/compare_nontrivial.json
   MOCK_ANTHROPIC_RESPONSE_FILE: .github/test-fixtures/claude_ok.json
+  MOCK_SKIP_GH_ISSUE_CALLS: "true"
   MONTHLY_CALL_LIMIT: "50"
-  SCENARIO_LABEL: "F-large-diff-truncation"
+  SCENARIO_LABEL: "G-regression-after-retry-fix"
 
 jobs:
   verify:
@@ -58,14 +59,45 @@ jobs:
       - name: Commit analysis bookkeeping (health state + audit log)
         if: steps.analyze.outcome == 'success'
         continue-on-error: true
+        env:
+          HEALTH_MUTATION: ${{ steps.analyze.outputs.health_mutation }}
         run: |
           set -euo pipefail
           git config user.name "test-harness"
           git config user.email "test-harness@example.invalid"
+
+          AUDIT_LINE=""
+          if [ -s "$AUDIT_LOG_FILE" ]; then
+            AUDIT_LINE=$(tail -n 1 "$AUDIT_LOG_FILE")
+          fi
+
           git add "$HEALTH_STATE_FILE" "$AUDIT_LOG_FILE"
-          git diff --cached --quiet && echo "No analysis bookkeeping change to commit" && exit 0
+          if git diff --cached --quiet; then
+            echo "No analysis bookkeeping change to commit"
+            exit 0
+          fi
           git commit -m "test: record Claude analysis outcome ($SCENARIO_LABEL) [skip ci]"
-          git push
+
+          for attempt in 1 2 3 4 5; do
+            if git push; then
+              exit 0
+            fi
+            echo "push failed (attempt $attempt/5); fetching the fresh base and re-deriving bookkeeping" >&2
+            git fetch origin "$GITHUB_REF_NAME"
+            git reset --hard "origin/$GITHUB_REF_NAME"
+            python3 .github/scripts/bump_health_state.py "$HEALTH_MUTATION"
+            if [ -n "$AUDIT_LINE" ]; then
+              echo "$AUDIT_LINE" >> "$AUDIT_LOG_FILE"
+            fi
+            git add "$HEALTH_STATE_FILE" "$AUDIT_LOG_FILE"
+            if git diff --cached --quiet; then
+              echo "Nothing to recommit after resync"
+              exit 0
+            fi
+            git commit -m "test: record Claude analysis outcome ($SCENARIO_LABEL) [skip ci]"
+          done
+          echo "Giving up on bookkeeping commit after 5 attempts." >&2
+          exit 1
 
       - name: "(MOCK) Open notification issue"
         if: steps.analyze.outputs.important == 'true'
@@ -111,9 +143,29 @@ jobs:
           git config user.name "test-harness"
           git config user.email "test-harness@example.invalid"
           git add "$HEALTH_STATE_FILE"
-          git diff --cached --quiet && echo "No health-state change to commit" && exit 0
+          if git diff --cached --quiet; then
+            echo "No health-state change to commit"
+            exit 0
+          fi
           git commit -m "test: record Claude analysis failure ($SCENARIO_LABEL) [skip ci]"
-          git push
+
+          for attempt in 1 2 3 4 5; do
+            if git push; then
+              exit 0
+            fi
+            echo "push failed (attempt $attempt/5); fetching the fresh base and re-deriving the failure count" >&2
+            git fetch origin "$GITHUB_REF_NAME"
+            git reset --hard "origin/$GITHUB_REF_NAME"
+            python3 .github/test-fixtures/mock_failure_test.py
+            git add "$HEALTH_STATE_FILE"
+            if git diff --cached --quiet; then
+              echo "Nothing to recommit after resync"
+              exit 0
+            fi
+            git commit -m "test: record Claude analysis failure ($SCENARIO_LABEL) [skip ci]"
+          done
+          echo "Giving up on failure-counter commit after 5 attempts." >&2
+          exit 1
 
       - name: Report important flag (for log inspection)
         if: always()
