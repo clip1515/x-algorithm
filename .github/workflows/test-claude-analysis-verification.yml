@@ -23,12 +23,18 @@ env:
   HEALTH_STATE_FILE: .github/test-fixtures/health-state.json
   AUDIT_LOG_FILE: .github/test-fixtures/audit-log.jsonl
   PREV_SHA: "eeee555555555555555555555555555555555e"
-  NEW_SHA: "ffff666666666666666666666666666666666f"
+  NEW_SHA: "bbbb999999999999999999999999999999999b"
   MOCK_COMPARE_RESPONSE_FILE: .github/test-fixtures/compare_nontrivial.json
   MOCK_ANTHROPIC_RESPONSE_FILE: .github/test-fixtures/claude_ok.json
-  MOCK_SKIP_GH_ISSUE_CALLS: "true"
+  # Deliberately NOT set this time: the real (unmocked) budget-exhaustion
+  # alert Issue-creation path must run and be observed to fail, since this
+  # workflow's `permissions:` block below grants only `contents: write`
+  # (no `issues: write`), so the real `gh_api` POST inside
+  # alert_budget_exhausted_once() should get HTTP 403 -- proving item 2:
+  # an alert-Issue-creation failure must fail the job, not be treated as
+  # success.
   MONTHLY_CALL_LIMIT: "3"
-  SCENARIO_LABEL: "I-budget-skip-must-not-advance-state"
+  SCENARIO_LABEL: "J-real-alert-issue-creation-failure-must-fail-job"
 
 jobs:
   verify:
@@ -168,9 +174,12 @@ jobs:
           exit 1
 
       - name: "(TEST) Simulate state advancement"
-        # Mirrors production's "Save latest seen commit" gating exactly:
-        # must NOT run when filter_stage is budget_circuit_breaker.
-        if: steps.analyze.outputs.filter_stage != 'budget_circuit_breaker'
+        # Mirrors production's "Save latest seen commit"/"Commit updated
+        # state" gating exactly: must NOT run when filter_stage is
+        # budget_circuit_breaker, AND must NOT run when anything earlier
+        # in the job failed (success() is NOT implicit once a step has
+        # its own `if:` -- this is the item 1/3 fix being verified here).
+        if: success() && steps.analyze.outputs.filter_stage != 'budget_circuit_breaker'
         run: |
           set -euo pipefail
           echo "{\"sha\": \"$NEW_SHA\"}" > .github/test-fixtures/simulated-state.json

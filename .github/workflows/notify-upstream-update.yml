@@ -175,61 +175,8 @@ jobs:
           INFERENCE_JA: ${{ steps.analyze.outputs.inference_ja }}
         run: |
           set -euo pipefail
-          DETECTED_AT_JST=$(TZ=Asia/Tokyo date +"%Y-%m-%d %H:%M:%S JST")
-          COMPARE_URL="https://github.com/${UPSTREAM_REPO}/compare/${PREV_SHA}...${NEW_SHA}"
-
-          BODY_FILE=$(mktemp)
-          {
-            echo "Upstream repository [\`${UPSTREAM_REPO}\`](https://github.com/${UPSTREAM_REPO}) has new commits since the last check, and Claude judged this change important."
-            echo
-            echo "**検知日時(JST):** ${DETECTED_AT_JST}"
-            echo "**変更箇所(カテゴリ):** ${CATEGORIES}"
-            echo "**実装状況:** ${IMPLEMENTED_STATUS}"
-            echo "**分析確度:** ${CONFIDENCE}"
-            echo "**最新コミット:** [${NEW_SHA}](${NEW_URL})"
-            echo "**Author:** ${NEW_AUTHOR}"
-            echo "**Date:** ${NEW_DATE}"
-            echo "**差分(compare):** [compare ${PREV_SHA:0:7}...${NEW_SHA:0:7}](${COMPARE_URL})"
-            echo
-            echo "**変更前と変更後:**"
-            echo "${BEFORE_AFTER_JA}"
-            echo
-            echo "**X投稿運用への影響:**"
-            echo "${IMPACT_ON_POSTING_JA}"
-            echo
-            echo "**推奨する対応:**"
-            echo "${RECOMMENDED_ACTION_JA}"
-            echo
-            echo "**確認済み事実:**"
-            echo "${CONFIRMED_FACTS_JA}"
-            echo
-            echo "**推測:**"
-            echo "${INFERENCE_JA}"
-            echo
-            echo "**要約:**"
-            echo "${SUMMARY_JA}"
-            echo
-            echo "**コミットメッセージ:**"
-            # 4-backtick fence: COMMIT_MESSAGE is untrusted external content
-            # (the upstream committer controls it) and could itself contain
-            # a 3-backtick sequence that would otherwise break out of the
-            # code block and let it render as arbitrary Markdown.
-            echo '````'
-            echo "$COMMIT_MESSAGE"
-            echo '````'
-            echo
-            echo "> **注意:** これはコミットが検知されたことを示すものであり、Xの推薦アルゴリズムの実際の挙動が"
-            echo "> 変わったことを保証するものではありません。上記のcompareリンクで実際の差分を確認してください。"
-            echo
-            echo "See the [upstream README's Notable Updates section](https://github.com/${UPSTREAM_REPO}#notable-updates) for a human-readable changelog."
-            echo
-            echo "---"
-            echo "_Opened automatically by the [Notify on X Algorithm Update](../actions/workflows/notify-upstream-update.yml) workflow._"
-          } > "$BODY_FILE"
-
-          gh issue create \
-            --title "🔔 X algorithm updated upstream ($(date -u +%Y-%m-%d))" \
-            --body-file "$BODY_FILE"
+          export DETECTED_AT_JST=$(TZ=Asia/Tokyo date +"%Y-%m-%d %H:%M:%S JST")
+          python3 .github/scripts/open_notification_issue.py
 
       - name: Record monitoring failure
         if: failure() && steps.analyze.outcome == 'failure'
@@ -280,16 +227,23 @@ jobs:
           exit 1
 
       - name: Save latest seen commit
-        # Deliberately excludes the budget_circuit_breaker case: a
-        # budget-skipped commit must NOT be recorded as seen, so that once
-        # the monthly budget resets, the next run's SHA comparison still
-        # finds it "new" and automatically retries analysis instead of
-        # permanently losing the chance (see write_filter_stage_output in
-        # analyze_upstream_diff.py). When the analyze step failed outright,
-        # this step is already skipped via GitHub Actions' default implicit
-        # success() gating (no explicit status function in this `if:`),
-        # same as before.
-        if: steps.upstream.outputs.sha != steps.prev.outputs.sha && steps.analyze.outputs.filter_stage != 'budget_circuit_breaker'
+        # success() is required explicitly here: once a step has its own
+        # `if:`, GitHub Actions does NOT implicitly AND in success() the way
+        # it would if the `if:` were omitted entirely. Without it, ANY
+        # failure earlier in the job (the analyze step failing outright for
+        # any reason -- API outage, schema violation, or the budget-alert
+        # Issue-creation failure -- or the real notification-Issue creation
+        # failing) would still leave filter_stage unset/non-'budget_circuit_
+        # breaker' and let this step advance upstream-state.json anyway,
+        # silently marking an update "seen" that was never actually
+        # analyzed or never actually surfaced to a human. Also excludes the
+        # budget_circuit_breaker case on its own merits: a budget-skipped
+        # commit must NOT be recorded as seen, so that once the monthly
+        # budget resets, the next run's SHA comparison still finds it "new"
+        # and automatically retries analysis instead of permanently losing
+        # the chance (see write_filter_stage_output in
+        # analyze_upstream_diff.py).
+        if: success() && steps.upstream.outputs.sha != steps.prev.outputs.sha && steps.analyze.outputs.filter_stage != 'budget_circuit_breaker'
         run: |
           mkdir -p "$(dirname "$STATE_FILE")"
           jq -n \
@@ -301,7 +255,9 @@ jobs:
             > "$STATE_FILE"
 
       - name: Commit updated state
-        if: steps.upstream.outputs.sha != steps.prev.outputs.sha && steps.analyze.outputs.filter_stage != 'budget_circuit_breaker'
+        # See the "Save latest seen commit" step above for why success()
+        # must be explicit here too.
+        if: success() && steps.upstream.outputs.sha != steps.prev.outputs.sha && steps.analyze.outputs.filter_stage != 'budget_circuit_breaker'
         env:
           NEW_SHA: ${{ steps.upstream.outputs.sha }}
           NEW_URL: ${{ steps.upstream.outputs.url }}
@@ -320,12 +276,14 @@ jobs:
           # Retry on push failure: if this push is lost, upstream-state.json
           # keeps pointing at the OLD sha while the real upstream HEAD has
           # already advanced. The next scheduled run would then see the
-          # same "new" sha again, re-run Claude (a second real API call),
-          # and -- since steps.analyze.outputs.important would most likely
-          # come back the same -- re-open a DUPLICATE notification Issue.
-          # Regenerating $STATE_FILE is a pure function of steps.upstream
-          # outputs (no prior state to merge), so it's always safe to
-          # redo after a reset.
+          # same "new" sha again and re-run Claude (a second real API
+          # call, unavoidable since state didn't advance). That re-run
+          # would NOT create a duplicate notification Issue even if
+          # important again: open_notification_issue.py searches for an
+          # existing Issue carrying this exact sha's marker before
+          # creating one. Regenerating $STATE_FILE is a pure function of
+          # steps.upstream outputs (no prior state to merge), so it's
+          # always safe to redo after a reset.
           for attempt in 1 2 3 4 5; do
             if git push; then
               exit 0
