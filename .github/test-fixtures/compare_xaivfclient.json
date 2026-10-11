@@ -1,0 +1,12 @@
+{
+  "html_url": "https://github.com/xai-org/x-algorithm/compare/xxx...yyy",
+  "total_commits": 1,
+  "commits": [{}],
+  "files": [
+    {
+      "filename": "visibility-filtering-client/tweet_safety_label.rs",
+      "status": "modified",
+      "patch": "+ let client: Arc<dyn VfClient> = Arc::new(XaiVfClient::new(channel));"
+    }
+  ]
+}
