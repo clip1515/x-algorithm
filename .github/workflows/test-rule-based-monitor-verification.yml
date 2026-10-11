@@ -26,9 +26,9 @@ env:
   AUDIT_LOG_FILE: .github/test-fixtures/audit-log.jsonl
   PREV_SHA: "aaaa111111111111111111111111111111111a"
   NEW_SHA: "bbbb222222222222222222222222222222222b"
-  MOCK_COMPARE_RESPONSE_FILE: .github/test-fixtures/compare_phoenix.json
+  MOCK_COMPARE_RESPONSE_FILE: .github/test-fixtures/compare_trivial.json
   MOCK_SKIP_GH_ISSUE_CALLS: "true"
-  SCENARIO_LABEL: "A-phoenix-category-match"
+  SCENARIO_LABEL: "B-trivial-prefilter-skip"
 
 jobs:
   verify:
