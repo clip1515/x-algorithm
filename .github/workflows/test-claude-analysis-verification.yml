@@ -22,12 +22,12 @@ env:
   UPSTREAM_REPO: xai-org/x-algorithm
   HEALTH_STATE_FILE: .github/test-fixtures/health-state.json
   AUDIT_LOG_FILE: .github/test-fixtures/audit-log.jsonl
-  PREV_SHA: "6666666666666666666666666666666666a11e"
-  NEW_SHA: "7777777777777777777777777777777777b22e"
-  MOCK_COMPARE_RESPONSE_FILE: .github/test-fixtures/compare_nontrivial.json
+  PREV_SHA: "8888888888888888888888888888888888c33e"
+  NEW_SHA: "9999999999999999999999999999999999d44e"
+  MOCK_COMPARE_RESPONSE_FILE: .github/test-fixtures/compare_large.json
   MOCK_ANTHROPIC_RESPONSE_FILE: .github/test-fixtures/claude_ok.json
-  MONTHLY_CALL_LIMIT: "1"
-  SCENARIO_LABEL: "E-budget-circuit-breaker"
+  MONTHLY_CALL_LIMIT: "50"
+  SCENARIO_LABEL: "F-large-diff-truncation"
 
 jobs:
   verify:
