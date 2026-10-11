@@ -16,6 +16,8 @@ permissions:
 env:
   UPSTREAM_REPO: xai-org/x-algorithm
   STATE_FILE: .github/upstream-state.json
+  HEALTH_STATE_FILE: .github/monitor-health-state.json
+  AUDIT_LOG_FILE: .github/notify-audit-log.jsonl
 
 jobs:
   check-upstream:
@@ -68,8 +70,31 @@ jobs:
           fi
           echo "sha=$PREV_SHA" >> "$GITHUB_OUTPUT"
 
-      - name: Open notification issue
+      - name: Analyze diff with Claude
+        id: analyze
         if: steps.upstream.outputs.sha != steps.prev.outputs.sha && steps.prev.outputs.sha != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          PREV_SHA: ${{ steps.prev.outputs.sha }}
+          NEW_SHA: ${{ steps.upstream.outputs.sha }}
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/analyze_upstream_diff.py
+
+      - name: Commit analysis bookkeeping (health state + audit log)
+        if: steps.analyze.outcome == 'success'
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "$HEALTH_STATE_FILE" "$AUDIT_LOG_FILE"
+          git diff --cached --quiet && echo "No analysis bookkeeping change to commit" && exit 0
+          git commit -m "chore: record Claude analysis outcome [skip ci]"
+          git push
+
+      - name: Open notification issue
+        if: steps.upstream.outputs.sha != steps.prev.outputs.sha && steps.prev.outputs.sha != '' && steps.analyze.outputs.important == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           COMMIT_MESSAGE: ${{ steps.upstream.outputs.message }}
@@ -78,6 +103,15 @@ jobs:
           NEW_DATE: ${{ steps.upstream.outputs.date }}
           NEW_AUTHOR: ${{ steps.upstream.outputs.author }}
           PREV_SHA: ${{ steps.prev.outputs.sha }}
+          CATEGORIES: ${{ steps.analyze.outputs.categories }}
+          IMPLEMENTED_STATUS: ${{ steps.analyze.outputs.implemented_status }}
+          CONFIDENCE: ${{ steps.analyze.outputs.confidence }}
+          SUMMARY_JA: ${{ steps.analyze.outputs.summary_ja }}
+          BEFORE_AFTER_JA: ${{ steps.analyze.outputs.before_after_ja }}
+          IMPACT_ON_POSTING_JA: ${{ steps.analyze.outputs.impact_on_posting_ja }}
+          RECOMMENDED_ACTION_JA: ${{ steps.analyze.outputs.recommended_action_ja }}
+          CONFIRMED_FACTS_JA: ${{ steps.analyze.outputs.confirmed_facts_ja }}
+          INFERENCE_JA: ${{ steps.analyze.outputs.inference_ja }}
         run: |
           set -euo pipefail
           DETECTED_AT_JST=$(TZ=Asia/Tokyo date +"%Y-%m-%d %H:%M:%S JST")
@@ -85,23 +119,42 @@ jobs:
 
           BODY_FILE=$(mktemp)
           {
-            echo "Upstream repository [\`${UPSTREAM_REPO}\`](https://github.com/${UPSTREAM_REPO}) has new commits since the last check."
+            echo "Upstream repository [\`${UPSTREAM_REPO}\`](https://github.com/${UPSTREAM_REPO}) has new commits since the last check, and Claude judged this change important."
             echo
-            echo "**Detected at (JST):** ${DETECTED_AT_JST}"
-            echo "**Latest commit:** [${NEW_SHA}](${NEW_URL})"
+            echo "**検知日時(JST):** ${DETECTED_AT_JST}"
+            echo "**変更箇所(カテゴリ):** ${CATEGORIES}"
+            echo "**実装状況:** ${IMPLEMENTED_STATUS}"
+            echo "**分析確度:** ${CONFIDENCE}"
+            echo "**最新コミット:** [${NEW_SHA}](${NEW_URL})"
             echo "**Author:** ${NEW_AUTHOR}"
             echo "**Date:** ${NEW_DATE}"
-            echo "**Diff since last check:** [compare ${PREV_SHA:0:7}...${NEW_SHA:0:7}](${COMPARE_URL})"
+            echo "**差分(compare):** [compare ${PREV_SHA:0:7}...${NEW_SHA:0:7}](${COMPARE_URL})"
             echo
-            echo "**Message:**"
+            echo "**変更前と変更後:**"
+            echo "${BEFORE_AFTER_JA}"
+            echo
+            echo "**X投稿運用への影響:**"
+            echo "${IMPACT_ON_POSTING_JA}"
+            echo
+            echo "**推奨する対応:**"
+            echo "${RECOMMENDED_ACTION_JA}"
+            echo
+            echo "**確認済み事実:**"
+            echo "${CONFIRMED_FACTS_JA}"
+            echo
+            echo "**推測:**"
+            echo "${INFERENCE_JA}"
+            echo
+            echo "**要約:**"
+            echo "${SUMMARY_JA}"
+            echo
+            echo "**コミットメッセージ:**"
             echo '```'
             echo "$COMMIT_MESSAGE"
             echo '```'
             echo
-            echo "> **Note:** This only means the upstream default branch has a new commit."
-            echo "> It does **not** by itself confirm that the X recommendation algorithm's actual ranking"
-            echo "> behavior changed (the commit could be docs/tests/CI-only). Check the compare link above"
-            echo "> to judge the real impact before assuming ranking logic changed."
+            echo "> **注意:** これはコミットが検知されたことを示すものであり、Xの推薦アルゴリズムの実際の挙動が"
+            echo "> 変わったことを保証するものではありません。上記のcompareリンクで実際の差分を確認してください。"
             echo
             echo "See the [upstream README's Notable Updates section](https://github.com/${UPSTREAM_REPO}#notable-updates) for a human-readable changelog."
             echo
@@ -112,6 +165,21 @@ jobs:
           gh issue create \
             --title "🔔 X algorithm updated upstream ($(date -u +%Y-%m-%d))" \
             --body-file "$BODY_FILE"
+
+      - name: Record monitoring failure
+        if: failure() && steps.analyze.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ALERT_THRESHOLD: "3"
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/record_monitor_failure.py
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "$HEALTH_STATE_FILE"
+          git diff --cached --quiet && echo "No health-state change to commit" && exit 0
+          git commit -m "chore: record Claude analysis failure [skip ci]"
+          git push
 
       - name: Save latest seen commit
         if: steps.upstream.outputs.sha != steps.prev.outputs.sha

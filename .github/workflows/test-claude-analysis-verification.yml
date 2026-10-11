@@ -1,0 +1,121 @@
+name: "[TEST] Claude analysis pipeline verification (temporary, do not merge)"
+
+# TEMPORARY, ISOLATED TEST HARNESS for the new "Analyze diff with Claude"
+# feature. Mirrors the relevant steps of notify-upstream-update.yml but:
+#   - uses test-only state/health/audit files under .github/test-fixtures/
+#     (never the production .github/upstream-state.json etc.)
+#   - mocks the Anthropic API call via MOCK_ANTHROPIC_RESPONSE_FILE
+#   - mocks `gh issue create` (no real Issue is ever created)
+#   - hardcodes PREV_SHA/NEW_SHA per scenario instead of re-deriving them,
+#     since the dedup/fetch logic itself was already verified separately.
+# Edit the env block below and push to re-run a different scenario.
+
+on:
+  push:
+    branches:
+      - test/claude-analysis-verification
+
+permissions:
+  contents: write
+
+env:
+  UPSTREAM_REPO: xai-org/x-algorithm
+  HEALTH_STATE_FILE: .github/test-fixtures/health-state.json
+  AUDIT_LOG_FILE: .github/test-fixtures/audit-log.jsonl
+  PREV_SHA: "0000000000000000000000000000000000dead"
+  NEW_SHA: "1111111111111111111111111111111111beef"
+  MOCK_COMPARE_RESPONSE_FILE: .github/test-fixtures/compare_nontrivial.json
+  MOCK_ANTHROPIC_RESPONSE_FILE: .github/test-fixtures/claude_ok.json
+  MONTHLY_CALL_LIMIT: "50"
+  SCENARIO_LABEL: "A-nontrivial-success"
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Reset test fixture state for this scenario
+        run: |
+          set -euo pipefail
+          echo "Running scenario: $SCENARIO_LABEL"
+          # Each scenario is responsible for seeding health-state.json itself
+          # via a separate commit if it needs non-default starting values;
+          # this step only ensures the audit log exists.
+          mkdir -p .github/test-fixtures
+          touch "$AUDIT_LOG_FILE"
+
+      - name: Analyze diff with Claude
+        id: analyze
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ANTHROPIC_API_KEY: "unused-because-mocked"
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/analyze_upstream_diff.py
+
+      - name: Commit analysis bookkeeping (health state + audit log)
+        if: steps.analyze.outcome == 'success'
+        run: |
+          set -euo pipefail
+          git config user.name "test-harness"
+          git config user.email "test-harness@example.invalid"
+          git add "$HEALTH_STATE_FILE" "$AUDIT_LOG_FILE"
+          git diff --cached --quiet && echo "No analysis bookkeeping change to commit" && exit 0
+          git commit -m "test: record Claude analysis outcome ($SCENARIO_LABEL) [skip ci]"
+          git push
+
+      - name: "(MOCK) Open notification issue"
+        if: steps.analyze.outputs.important == 'true'
+        env:
+          CATEGORIES: ${{ steps.analyze.outputs.categories }}
+          IMPLEMENTED_STATUS: ${{ steps.analyze.outputs.implemented_status }}
+          CONFIDENCE: ${{ steps.analyze.outputs.confidence }}
+          SUMMARY_JA: ${{ steps.analyze.outputs.summary_ja }}
+          BEFORE_AFTER_JA: ${{ steps.analyze.outputs.before_after_ja }}
+          IMPACT_ON_POSTING_JA: ${{ steps.analyze.outputs.impact_on_posting_ja }}
+          RECOMMENDED_ACTION_JA: ${{ steps.analyze.outputs.recommended_action_ja }}
+          CONFIRMED_FACTS_JA: ${{ steps.analyze.outputs.confirmed_facts_ja }}
+          INFERENCE_JA: ${{ steps.analyze.outputs.inference_ja }}
+        run: |
+          set -euo pipefail
+          echo "===== MOCK gh issue create (no real API call made) ====="
+          echo "categories=$CATEGORIES"
+          echo "implemented_status=$IMPLEMENTED_STATUS"
+          echo "confidence=$CONFIDENCE"
+          echo "summary_ja=$SUMMARY_JA"
+          echo "before_after_ja=$BEFORE_AFTER_JA"
+          echo "impact_on_posting_ja=$IMPACT_ON_POSTING_JA"
+          echo "recommended_action_ja=$RECOMMENDED_ACTION_JA"
+          echo "confirmed_facts_ja=$CONFIRMED_FACTS_JA"
+          echo "inference_ja=$INFERENCE_JA"
+          echo "=========================================================="
+          echo "(mock) issue creation would have succeeded"
+
+      - name: Record monitoring failure
+        if: failure() && steps.analyze.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ALERT_THRESHOLD: "3"
+        run: |
+          set -euo pipefail
+          echo "===== MOCK alert issue creation (record_monitor_failure.py GitHub calls stubbed) ====="
+          python3 .github/test-fixtures/mock_failure_test.py
+
+      - name: Commit health-state after failure handling
+        if: failure() && steps.analyze.outcome == 'failure'
+        run: |
+          set -euo pipefail
+          git config user.name "test-harness"
+          git config user.email "test-harness@example.invalid"
+          git add "$HEALTH_STATE_FILE"
+          git diff --cached --quiet && echo "No health-state change to commit" && exit 0
+          git commit -m "test: record Claude analysis failure ($SCENARIO_LABEL) [skip ci]"
+          git push
+
+      - name: Report important flag (for log inspection)
+        if: always()
+        run: |
+          echo "analyze.outcome=${{ steps.analyze.outcome }}"
+          echo "analyze.outputs.important=${{ steps.analyze.outputs.important }}"

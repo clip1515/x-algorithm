@@ -1,0 +1,9 @@
+{
+  "total_commits": 2,
+  "html_url": "https://github.com/xai-org/x-algorithm/compare/aaa...bbb",
+  "commits": [{"sha": "aaa"}, {"sha": "bbb"}],
+  "files": [
+    {"filename": "home-mixer/scorers/ranking_scorer.rs", "status": "modified", "patch": "-weight = 1.0\n+weight = 1.5"},
+    {"filename": "README.md", "status": "modified", "patch": "- old\n+ new"}
+  ]
+}
