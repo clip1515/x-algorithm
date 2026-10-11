@@ -20,7 +20,7 @@ env:
   UPSTREAM_REPO: xai-org/x-algorithm
   STATE_FILE: .github/test-upstream-state.json # TEST-ONLY file, never the production state file
   # Edited per test scenario, then committed+pushed to trigger a run:
-  SEED_PREV_SHA: "0000000000000000000000000000000000dead"
+  SEED_PREV_SHA: ""
   FAIL_ISSUE_CREATE: "false"
 
 jobs:
