@@ -481,8 +481,8 @@ def alert_budget_exhausted_once(health: dict, month: str, compare_url: str) -> b
         "以下の差分はClaudeで分析されませんでした。\n\n"
         f"- 差分URL: {compare_url}\n"
         f"- 実行URL: {run_url}\n\n"
-        "**重要:** この差分に重要な変更が含まれていないか、人手で確認してください。"
-        "upstream-state.jsonは通常通り更新されるため、この差分が自動で再分析されることはありません。\n\n"
+        "**重要:** この差分に重要な変更が含まれていないか、できれば人手でも確認してください。"
+        "upstream-state.jsonは今回更新されないため、来月以降予算が回復すれば次回実行時に自動で再分析されます。\n\n"
         "上限は `MONTHLY_CALL_LIMIT` で調整できます。"
         "通常の利用ではこの上限に達することは想定していないため、"
         "到達した場合は無限ループ等のバグを疑ってください。"
@@ -496,10 +496,11 @@ def alert_budget_exhausted_once(health: dict, month: str, compare_url: str) -> b
         )
         print(f"Created budget-exhaustion alert Issue for {month}.")
     except (urllib.error.HTTPError, urllib.error.URLError) as e:
-        # Don't let a failure to create the *alert* turn into a failed job
-        # (the analysis itself already completed correctly as "skipped");
-        # this is best-effort visibility, not the primary safety mechanism.
-        print(f"Failed to create budget-exhaustion alert Issue: {e}", file=sys.stderr)
+        # A failure here must NOT be silently treated as success: this is
+        # the only notification path for a budget-skipped commit, so if it
+        # can't be created, the operator needs to see a failed job (and the
+        # existing consecutive-failure/alert machinery), not a quiet skip.
+        raise AnalysisError(f"Failed to create budget-exhaustion alert Issue: {e}") from e
 
     health["budget_alert_sent_for_month"] = month
     return True
@@ -520,6 +521,21 @@ def append_audit_log(path: str, entry: dict) -> None:
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with open(path, "a", encoding="utf-8") as f:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+
+def write_filter_stage_output(stage: str) -> None:
+    """Tells the calling workflow which path this run took: 'path_prefilter',
+    'budget_circuit_breaker', or 'claude'. Used specifically to gate state
+    advancement: a budget-skipped commit must NOT be recorded into
+    upstream-state.json, so that once the monthly budget resets, the next
+    run's prev-vs-upstream SHA comparison still finds it "new" and
+    automatically re-attempts analysis -- instead of silently losing the
+    chance to ever analyze it once state has moved past it.
+    """
+    if GITHUB_OUTPUT is None:
+        return
+    with open(GITHUB_OUTPUT, "a", encoding="utf-8") as f:
+        f.write(f"filter_stage={stage}\n")
 
 
 def write_health_mutation_output(mutation: str) -> None:
@@ -592,6 +608,7 @@ def main() -> int:
         append_audit_log(AUDIT_LOG_FILE, audit_base)
         write_output(False, None)
         write_health_mutation_output("none")
+        write_filter_stage_output("path_prefilter")
         print("Pre-filter: all changed files are trivial (docs/CI/tests). Skipping Claude call.")
         return 0
 
@@ -611,16 +628,21 @@ def main() -> int:
             "skipping analysis for this run.",
             file=sys.stderr,
         )
-        # A budget skip must never be silent: this commit will never be
-        # re-analyzed once state advances past it, so a human is alerted
-        # (once per month) with the compare link to check by hand. This
-        # alert Issue creation costs nothing (no Claude call) and failing to
-        # create it does not fail this step -- it's best-effort visibility
-        # layered on top of the audit-log entry above, which always lands.
+        # A budget skip must never be silent, and must never be a dead end:
+        # write_filter_stage_output("budget_circuit_breaker") below tells
+        # the workflow to SKIP state advancement, so upstream-state.json is
+        # NOT updated to this SHA. That means once the monthly budget
+        # resets, the next run's prev-vs-upstream comparison still finds
+        # this commit (or the accumulated range since it) "new" and
+        # automatically retries analysis -- no commit is ever permanently
+        # skipped just because the budget happened to be exhausted when it
+        # first appeared. The alert Issue created here (if not already sent
+        # this month) is a *second*, independent line of defense: immediate
+        # human visibility while waiting for the automatic retry.
         alert_fired = alert_budget_exhausted_once(health, month, compare["compare_url"])
-        # Not an error: this is an intentional, auditable skip, not a failure.
         save_health_state(HEALTH_STATE_FILE, health)
         write_health_mutation_output(f"budget_alert:{month}" if alert_fired else "none")
+        write_filter_stage_output("budget_circuit_breaker")
         return 0
 
     diff_text, diff_truncated = build_diff_text(compare["files"], MAX_DIFF_CHARS)
@@ -654,6 +676,7 @@ def main() -> int:
 
     write_output(result["important"], result)
     write_health_mutation_output("success")
+    write_filter_stage_output("claude")
     print(f"Claude analysis complete: important={result['important']}")
     return 0
 

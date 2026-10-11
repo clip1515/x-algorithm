@@ -22,13 +22,13 @@ env:
   UPSTREAM_REPO: xai-org/x-algorithm
   HEALTH_STATE_FILE: .github/test-fixtures/health-state.json
   AUDIT_LOG_FILE: .github/test-fixtures/audit-log.jsonl
-  PREV_SHA: "cccc333333333333333333333333333333333c"
-  NEW_SHA: "dddd444444444444444444444444444444444d"
+  PREV_SHA: "eeee555555555555555555555555555555555e"
+  NEW_SHA: "ffff666666666666666666666666666666666f"
   MOCK_COMPARE_RESPONSE_FILE: .github/test-fixtures/compare_nontrivial.json
   MOCK_ANTHROPIC_RESPONSE_FILE: .github/test-fixtures/claude_ok.json
   MOCK_SKIP_GH_ISSUE_CALLS: "true"
   MONTHLY_CALL_LIMIT: "3"
-  SCENARIO_LABEL: "H2-budget-exhaustion-alert-mocked-properly"
+  SCENARIO_LABEL: "I-budget-skip-must-not-advance-state"
 
 jobs:
   verify:
@@ -167,8 +167,18 @@ jobs:
           echo "Giving up on failure-counter commit after 5 attempts." >&2
           exit 1
 
+      - name: "(TEST) Simulate state advancement"
+        # Mirrors production's "Save latest seen commit" gating exactly:
+        # must NOT run when filter_stage is budget_circuit_breaker.
+        if: steps.analyze.outputs.filter_stage != 'budget_circuit_breaker'
+        run: |
+          set -euo pipefail
+          echo "{\"sha\": \"$NEW_SHA\"}" > .github/test-fixtures/simulated-state.json
+          echo "State WOULD advance to $NEW_SHA (filter_stage=${{ steps.analyze.outputs.filter_stage }})"
+
       - name: Report important flag (for log inspection)
         if: always()
         run: |
           echo "analyze.outcome=${{ steps.analyze.outcome }}"
           echo "analyze.outputs.important=${{ steps.analyze.outputs.important }}"
+          echo "analyze.outputs.filter_stage=${{ steps.analyze.outputs.filter_stage }}"

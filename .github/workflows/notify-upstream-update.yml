@@ -280,7 +280,16 @@ jobs:
           exit 1
 
       - name: Save latest seen commit
-        if: steps.upstream.outputs.sha != steps.prev.outputs.sha
+        # Deliberately excludes the budget_circuit_breaker case: a
+        # budget-skipped commit must NOT be recorded as seen, so that once
+        # the monthly budget resets, the next run's SHA comparison still
+        # finds it "new" and automatically retries analysis instead of
+        # permanently losing the chance (see write_filter_stage_output in
+        # analyze_upstream_diff.py). When the analyze step failed outright,
+        # this step is already skipped via GitHub Actions' default implicit
+        # success() gating (no explicit status function in this `if:`),
+        # same as before.
+        if: steps.upstream.outputs.sha != steps.prev.outputs.sha && steps.analyze.outputs.filter_stage != 'budget_circuit_breaker'
         run: |
           mkdir -p "$(dirname "$STATE_FILE")"
           jq -n \
@@ -292,11 +301,51 @@ jobs:
             > "$STATE_FILE"
 
       - name: Commit updated state
-        if: steps.upstream.outputs.sha != steps.prev.outputs.sha
+        if: steps.upstream.outputs.sha != steps.prev.outputs.sha && steps.analyze.outputs.filter_stage != 'budget_circuit_breaker'
+        env:
+          NEW_SHA: ${{ steps.upstream.outputs.sha }}
+          NEW_URL: ${{ steps.upstream.outputs.url }}
+          NEW_DATE: ${{ steps.upstream.outputs.date }}
         run: |
+          set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add "$STATE_FILE"
-          git diff --cached --quiet && echo "No state change to commit" && exit 0
+          if git diff --cached --quiet; then
+            echo "No state change to commit"
+            exit 0
+          fi
           git commit -m "chore: record latest seen upstream commit [skip ci]"
-          git push
+
+          # Retry on push failure: if this push is lost, upstream-state.json
+          # keeps pointing at the OLD sha while the real upstream HEAD has
+          # already advanced. The next scheduled run would then see the
+          # same "new" sha again, re-run Claude (a second real API call),
+          # and -- since steps.analyze.outputs.important would most likely
+          # come back the same -- re-open a DUPLICATE notification Issue.
+          # Regenerating $STATE_FILE is a pure function of steps.upstream
+          # outputs (no prior state to merge), so it's always safe to
+          # redo after a reset.
+          for attempt in 1 2 3 4 5; do
+            if git push; then
+              exit 0
+            fi
+            echo "push failed (attempt $attempt/5); fetching the fresh base and regenerating state" >&2
+            git fetch origin "$GITHUB_REF_NAME"
+            git reset --hard "origin/$GITHUB_REF_NAME"
+            jq -n \
+              --arg sha "$NEW_SHA" \
+              --arg url "$NEW_URL" \
+              --arg date "$NEW_DATE" \
+              --arg checked_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+              '{sha: $sha, url: $url, date: $date, checked_at: $checked_at}' \
+              > "$STATE_FILE"
+            git add "$STATE_FILE"
+            if git diff --cached --quiet; then
+              echo "Nothing to recommit after resync (remote already has this sha)"
+              exit 0
+            fi
+            git commit -m "chore: record latest seen upstream commit [skip ci]"
+          done
+          echo "Giving up on state commit after 5 attempts." >&2
+          exit 1
