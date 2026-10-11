@@ -73,24 +73,45 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           COMMIT_MESSAGE: ${{ steps.upstream.outputs.message }}
+          NEW_SHA: ${{ steps.upstream.outputs.sha }}
+          NEW_URL: ${{ steps.upstream.outputs.url }}
+          NEW_DATE: ${{ steps.upstream.outputs.date }}
+          NEW_AUTHOR: ${{ steps.upstream.outputs.author }}
+          PREV_SHA: ${{ steps.prev.outputs.sha }}
         run: |
+          set -euo pipefail
+          DETECTED_AT_JST=$(TZ=Asia/Tokyo date +"%Y-%m-%d %H:%M:%S JST")
+          COMPARE_URL="https://github.com/${UPSTREAM_REPO}/compare/${PREV_SHA}...${NEW_SHA}"
+
+          BODY_FILE=$(mktemp)
+          {
+            echo "Upstream repository [\`${UPSTREAM_REPO}\`](https://github.com/${UPSTREAM_REPO}) has new commits since the last check."
+            echo
+            echo "**Detected at (JST):** ${DETECTED_AT_JST}"
+            echo "**Latest commit:** [${NEW_SHA}](${NEW_URL})"
+            echo "**Author:** ${NEW_AUTHOR}"
+            echo "**Date:** ${NEW_DATE}"
+            echo "**Diff since last check:** [compare ${PREV_SHA:0:7}...${NEW_SHA:0:7}](${COMPARE_URL})"
+            echo
+            echo "**Message:**"
+            echo '```'
+            echo "$COMMIT_MESSAGE"
+            echo '```'
+            echo
+            echo "> **Note:** This only means the upstream default branch has a new commit."
+            echo "> It does **not** by itself confirm that the X recommendation algorithm's actual ranking"
+            echo "> behavior changed (the commit could be docs/tests/CI-only). Check the compare link above"
+            echo "> to judge the real impact before assuming ranking logic changed."
+            echo
+            echo "See the [upstream README's Notable Updates section](https://github.com/${UPSTREAM_REPO}#notable-updates) for a human-readable changelog."
+            echo
+            echo "---"
+            echo "_Opened automatically by the [Notify on X Algorithm Update](../actions/workflows/notify-upstream-update.yml) workflow._"
+          } > "$BODY_FILE"
+
           gh issue create \
             --title "🔔 X algorithm updated upstream ($(date -u +%Y-%m-%d))" \
-            --body "Upstream repository [\`${UPSTREAM_REPO}\`](https://github.com/${UPSTREAM_REPO}) has new commits since the last check.
-
-          **Latest commit:** [${{ steps.upstream.outputs.sha }}](${{ steps.upstream.outputs.url }})
-          **Author:** ${{ steps.upstream.outputs.author }}
-          **Date:** ${{ steps.upstream.outputs.date }}
-
-          **Message:**
-          \`\`\`
-          ${COMMIT_MESSAGE}
-          \`\`\`
-
-          See the [upstream README's Notable Updates section](https://github.com/${UPSTREAM_REPO}#notable-updates) for a human-readable changelog.
-
-          ---
-          _Opened automatically by the [Notify on X Algorithm Update](../actions/workflows/notify-upstream-update.yml) workflow._"
+            --body-file "$BODY_FILE"
 
       - name: Save latest seen commit
         if: steps.upstream.outputs.sha != steps.prev.outputs.sha
