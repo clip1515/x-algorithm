@@ -10,14 +10,14 @@ Used two ways by the calling workflow step:
    whatever is actually on the remote now -- never by replaying a stale
    git commit (which, for a small mutable counter file, can conflict on
    rebase even when the two writers' *intent* doesn't actually conflict;
-   proven by direct test against a simulated race). This script never
-   calls Claude or any network API, so re-running it costs nothing and has
-   no side effects beyond the local file -- safe to retry any number of
+   proven by direct test against a simulated race). This script makes no
+   network call of any kind, so re-running it costs nothing and has no
+   side effects beyond the local file -- safe to retry any number of
    times.
 
 Usage: bump_health_state.py <mutation>
-  mutation is 'none', 'success', or 'budget_alert:<YYYY-MM>', matching the
-  `health_mutation` output of analyze_upstream_diff.py.
+  mutation is 'none' or 'success', matching the `health_mutation` output
+  of analyze_upstream_diff.py.
 """
 from __future__ import annotations
 
@@ -29,23 +29,22 @@ import sys
 HEALTH_STATE_FILE = os.environ.get("HEALTH_STATE_FILE", ".github/monitor-health-state.json")
 
 
-def current_month() -> str:
-    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m")
-
-
 def load_health_state(path: str) -> dict:
     if not os.path.exists(path):
         return {
-            "consecutive_claude_failures": 0,
-            "calls_this_month": 0,
-            "budget_month": "",
+            "consecutive_analysis_failures": 0,
             "last_success_at": None,
             "last_failure_at": None,
-            "budget_alert_sent_for_month": None,
         }
     with open(path, "r", encoding="utf-8") as f:
         state = json.load(f)
-    state.setdefault("budget_alert_sent_for_month", None)
+    if "consecutive_analysis_failures" not in state and "consecutive_claude_failures" in state:
+        state["consecutive_analysis_failures"] = state.pop("consecutive_claude_failures")
+    state.setdefault("consecutive_analysis_failures", 0)
+    state.setdefault("last_success_at", None)
+    state.setdefault("last_failure_at", None)
+    for obsolete_key in ("calls_this_month", "budget_month", "budget_alert_sent_for_month", "consecutive_claude_failures"):
+        state.pop(obsolete_key, None)
     return state
 
 
@@ -58,7 +57,7 @@ def save_health_state(path: str, state: dict) -> None:
 
 def main() -> int:
     if len(sys.argv) != 2:
-        print("usage: bump_health_state.py <none|success|budget_alert:MONTH>", file=sys.stderr)
+        print("usage: bump_health_state.py <none|success>", file=sys.stderr)
         return 1
     mutation = sys.argv[1]
 
@@ -66,19 +65,11 @@ def main() -> int:
         return 0
 
     now_iso = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    month = current_month()
     state = load_health_state(HEALTH_STATE_FILE)
-    if state.get("budget_month") != month:
-        state["budget_month"] = month
-        state["calls_this_month"] = 0
 
     if mutation == "success":
-        state["consecutive_claude_failures"] = 0
-        state["calls_this_month"] = state.get("calls_this_month", 0) + 1
+        state["consecutive_analysis_failures"] = 0
         state["last_success_at"] = now_iso
-    elif mutation.startswith("budget_alert:"):
-        alert_month = mutation.split(":", 1)[1]
-        state["budget_alert_sent_for_month"] = alert_month
     else:
         print(f"Unknown mutation: {mutation!r}", file=sys.stderr)
         return 1

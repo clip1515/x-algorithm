@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
-"""Record a Claude-analysis failure in the health-state file and, once a
-consecutive-failure threshold is crossed, create or update a dedicated
+"""Record a rule-based-analysis failure in the health-state file and, once
+a consecutive-failure threshold is crossed, create or update a dedicated
 alert Issue so the failure is visible without checking the Actions tab.
 
-Run only when the "Analyze diff with Claude" step failed
+A failure here means the "Analyze diff" step itself failed -- in this
+free, rule-based pipeline that almost always means the GitHub compare API
+call failed (network error, rate limit, response-shape change), since the
+classifier itself is local Python with no external dependency.
+
+Run only when the "Analyze diff" step failed
 (`if: steps.analyze.outcome == 'failure'`). Does not touch
 .github/upstream-state.json or any Issue created for an actual upstream
 update; this is a separate, independent commit/alert path.
@@ -22,7 +27,7 @@ HEALTH_STATE_FILE = os.environ.get("HEALTH_STATE_FILE", ".github/monitor-health-
 ALERT_THRESHOLD = int(os.environ.get("ALERT_THRESHOLD", "3"))
 GH_TOKEN = os.environ["GH_TOKEN"]
 REPO = os.environ["GITHUB_REPOSITORY"]  # owner/repo, set by GitHub Actions
-ALERT_TITLE = "⚠️ 監視システム異常: Claude分析が連続失敗しています"
+ALERT_TITLE = "⚠️ 監視システム異常: 差分分析が連続失敗しています"
 RUN_URL = (
     f"https://github.com/{REPO}/actions/runs/{os.environ.get('GITHUB_RUN_ID', '')}"
 )
@@ -31,14 +36,18 @@ RUN_URL = (
 def load_health_state(path: str) -> dict:
     if not os.path.exists(path):
         return {
-            "consecutive_claude_failures": 0,
-            "calls_this_month": 0,
-            "budget_month": "",
+            "consecutive_analysis_failures": 0,
             "last_success_at": None,
             "last_failure_at": None,
         }
     with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
+        state = json.load(f)
+    if "consecutive_analysis_failures" not in state and "consecutive_claude_failures" in state:
+        state["consecutive_analysis_failures"] = state.pop("consecutive_claude_failures")
+    state.setdefault("consecutive_analysis_failures", 0)
+    for obsolete_key in ("calls_this_month", "budget_month", "budget_alert_sent_for_month", "consecutive_claude_failures"):
+        state.pop(obsolete_key, None)
+    return state
 
 
 def save_health_state(path: str, state: dict) -> None:
@@ -86,22 +95,22 @@ def find_open_alert_issue(repo: str, token: str) -> int | None:
 def main() -> int:
     now_iso = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     state = load_health_state(HEALTH_STATE_FILE)
-    state["consecutive_claude_failures"] = state.get("consecutive_claude_failures", 0) + 1
+    state["consecutive_analysis_failures"] = state.get("consecutive_analysis_failures", 0) + 1
     state["last_failure_at"] = now_iso
     save_health_state(HEALTH_STATE_FILE, state)
 
-    count = state["consecutive_claude_failures"]
-    print(f"Recorded Claude-analysis failure. Consecutive failures: {count}")
+    count = state["consecutive_analysis_failures"]
+    print(f"Recorded analysis failure. Consecutive failures: {count}")
 
     if count < ALERT_THRESHOLD:
         return 0
 
     body_text = (
-        f"Claude分析ステップが **{count}回連続** で失敗しました。\n\n"
+        f"差分分析ステップが **{count}回連続** で失敗しました。\n\n"
         f"- 最新失敗時刻(UTC): {now_iso}\n"
         f"- 実行URL: {RUN_URL}\n\n"
-        "ANTHROPIC_API_KEYの有効期限・残高、Anthropic APIの障害状況、"
-        "またはGitHub compare APIの応答形式変更などを確認してください。\n\n"
+        "この監視は無料のルールベース分析のみを使用しており、有料APIには依存していません。"
+        "GitHub compare APIの障害・レート制限、または応答形式の変更などを確認してください。\n\n"
         "この間、upstream-state.jsonは更新されていません(正常な安全振る舞いです)。"
     )
 

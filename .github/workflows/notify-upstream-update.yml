@@ -14,7 +14,7 @@ on:
 # race on the same git refs (upstream-state.json, monitor-health-state.json,
 # notify-audit-log.jsonl), causing a git push to fail non-fast-forward.
 # cancel-in-progress: false so an overlapping trigger queues instead of
-# killing an in-flight run partway through its Claude call / Issue creation.
+# killing an in-flight run partway through its analysis / Issue creation.
 concurrency:
   group: ${{ github.workflow }}
   cancel-in-progress: false
@@ -80,12 +80,11 @@ jobs:
           fi
           echo "sha=$PREV_SHA" >> "$GITHUB_OUTPUT"
 
-      - name: Analyze diff with Claude
+      - name: Analyze diff (free, rule-based -- no paid API)
         id: analyze
         if: steps.upstream.outputs.sha != steps.prev.outputs.sha && steps.prev.outputs.sha != ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           PREV_SHA: ${{ steps.prev.outputs.sha }}
           NEW_SHA: ${{ steps.upstream.outputs.sha }}
         run: |
@@ -112,8 +111,8 @@ jobs:
           # Capture the one audit-log line this run just appended (if any),
           # so it can be re-applied verbatim after a reset+retry without
           # re-invoking analyze_upstream_diff.py -- that would mean a
-          # second real Claude API call, which must never happen as a side
-          # effect of a git push retry.
+          # second GitHub compare API call, which should not happen as a
+          # side effect of a git push retry.
           AUDIT_LINE=""
           if [ -s "$AUDIT_LOG_FILE" ]; then
             AUDIT_LINE=$(tail -n 1 "$AUDIT_LOG_FILE")
@@ -124,7 +123,7 @@ jobs:
             echo "No analysis bookkeeping change to commit"
             exit 0
           fi
-          git commit -m "chore: record Claude analysis outcome [skip ci]"
+          git commit -m "chore: record analysis outcome [skip ci]"
 
           for attempt in 1 2 3 4 5; do
             if git push; then
@@ -137,7 +136,7 @@ jobs:
             # (verified by direct test against a simulated concurrent
             # write). Discarding and re-deriving the mutation fresh from
             # whatever is now on the remote is correct and safe because
-            # bump_health_state.py never calls Claude or any paid API.
+            # bump_health_state.py makes no network call of any kind.
             git fetch origin "$GITHUB_REF_NAME"
             git reset --hard "origin/$GITHUB_REF_NAME"
             python3 .github/scripts/bump_health_state.py "$HEALTH_MUTATION"
@@ -149,7 +148,7 @@ jobs:
               echo "Nothing to recommit after resync"
               exit 0
             fi
-            git commit -m "chore: record Claude analysis outcome [skip ci]"
+            git commit -m "chore: record analysis outcome [skip ci]"
           done
           echo "Giving up on bookkeeping commit after 5 attempts; audit-log entry for this run was NOT pushed." >&2
           exit 1
@@ -194,10 +193,10 @@ jobs:
             echo "No health-state change to commit"
             exit 0
           fi
-          git commit -m "chore: record Claude analysis failure [skip ci]"
+          git commit -m "chore: record analysis failure [skip ci]"
 
           # A lost push here would silently under-count
-          # consecutive_claude_failures on the next run, delaying or
+          # consecutive_analysis_failures on the next run, delaying or
           # skipping the alert threshold -- but a textual rebase of a
           # stale counter-file edit onto a moved base can conflict even
           # when the two writers' intent doesn't actually conflict
@@ -221,7 +220,7 @@ jobs:
               echo "Nothing to recommit after resync"
               exit 0
             fi
-            git commit -m "chore: record Claude analysis failure [skip ci]"
+            git commit -m "chore: record analysis failure [skip ci]"
           done
           echo "Giving up on failure-counter commit after 5 attempts." >&2
           exit 1
@@ -230,20 +229,13 @@ jobs:
         # success() is required explicitly here: once a step has its own
         # `if:`, GitHub Actions does NOT implicitly AND in success() the way
         # it would if the `if:` were omitted entirely. Without it, ANY
-        # failure earlier in the job (the analyze step failing outright for
-        # any reason -- API outage, schema violation, or the budget-alert
-        # Issue-creation failure -- or the real notification-Issue creation
-        # failing) would still leave filter_stage unset/non-'budget_circuit_
-        # breaker' and let this step advance upstream-state.json anyway,
-        # silently marking an update "seen" that was never actually
-        # analyzed or never actually surfaced to a human. Also excludes the
-        # budget_circuit_breaker case on its own merits: a budget-skipped
-        # commit must NOT be recorded as seen, so that once the monthly
-        # budget resets, the next run's SHA comparison still finds it "new"
-        # and automatically retries analysis instead of permanently losing
-        # the chance (see write_filter_stage_output in
-        # analyze_upstream_diff.py).
-        if: success() && steps.upstream.outputs.sha != steps.prev.outputs.sha && steps.analyze.outputs.filter_stage != 'budget_circuit_breaker'
+        # failure earlier in the job (the analyze step failing outright --
+        # e.g. the GitHub compare API erroring -- or the real
+        # notification-Issue creation failing) would still let this step
+        # advance upstream-state.json anyway, silently marking an update
+        # "seen" that was never actually analyzed or never actually
+        # surfaced to a human.
+        if: success() && steps.upstream.outputs.sha != steps.prev.outputs.sha
         run: |
           mkdir -p "$(dirname "$STATE_FILE")"
           jq -n \
@@ -257,7 +249,7 @@ jobs:
       - name: Commit updated state
         # See the "Save latest seen commit" step above for why success()
         # must be explicit here too.
-        if: success() && steps.upstream.outputs.sha != steps.prev.outputs.sha && steps.analyze.outputs.filter_stage != 'budget_circuit_breaker'
+        if: success() && steps.upstream.outputs.sha != steps.prev.outputs.sha
         env:
           NEW_SHA: ${{ steps.upstream.outputs.sha }}
           NEW_URL: ${{ steps.upstream.outputs.url }}
@@ -276,14 +268,14 @@ jobs:
           # Retry on push failure: if this push is lost, upstream-state.json
           # keeps pointing at the OLD sha while the real upstream HEAD has
           # already advanced. The next scheduled run would then see the
-          # same "new" sha again and re-run Claude (a second real API
-          # call, unavoidable since state didn't advance). That re-run
-          # would NOT create a duplicate notification Issue even if
-          # important again: open_notification_issue.py searches for an
-          # existing Issue carrying this exact sha's marker before
-          # creating one. Regenerating $STATE_FILE is a pure function of
-          # steps.upstream outputs (no prior state to merge), so it's
-          # always safe to redo after a reset.
+          # same "new" sha again and re-run the analysis (unavoidable
+          # since state didn't advance -- though free, so no cost either
+          # way). That re-run would NOT create a duplicate notification
+          # Issue even if important again: open_notification_issue.py
+          # searches for an existing Issue carrying this exact sha's
+          # marker before creating one. Regenerating $STATE_FILE is a pure
+          # function of steps.upstream outputs (no prior state to merge),
+          # so it's always safe to redo after a reset.
           for attempt in 1 2 3 4 5; do
             if git push; then
               exit 0

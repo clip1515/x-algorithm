@@ -88,7 +88,8 @@ def build_body() -> str:
     compare_url = f"https://github.com/{UPSTREAM_REPO}/compare/{PREV_SHA}...{NEW_SHA}"
     lines = [
         f"Upstream repository [`{UPSTREAM_REPO}`](https://github.com/{UPSTREAM_REPO}) "
-        "has new commits since the last check, and Claude judged this change important.",
+        "has new commits since the last check, and the free, rule-based "
+        "analysis below flagged this change as potentially important.",
         "",
         f"**検知日時(JST):** {DETECTED_AT_JST}",
         f"**変更箇所(カテゴリ):** {CATEGORIES}",
