@@ -9,6 +9,16 @@ on:
     - cron: "0 */6 * * *" # every 6 hours
   workflow_dispatch: {} # allow manual runs from the Actions tab
 
+# Serialize runs of this workflow. Without this, a manual workflow_dispatch
+# overlapping a scheduled run (or two scheduled runs if one runs long) can
+# race on the same git refs (upstream-state.json, monitor-health-state.json,
+# notify-audit-log.jsonl), causing a git push to fail non-fast-forward.
+# cancel-in-progress: false so an overlapping trigger queues instead of
+# killing an in-flight run partway through its Claude call / Issue creation.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
 permissions:
   contents: write
   issues: write
@@ -16,6 +26,8 @@ permissions:
 env:
   UPSTREAM_REPO: xai-org/x-algorithm
   STATE_FILE: .github/upstream-state.json
+  HEALTH_STATE_FILE: .github/monitor-health-state.json
+  AUDIT_LOG_FILE: .github/notify-audit-log.jsonl
 
 jobs:
   check-upstream:
@@ -68,8 +80,82 @@ jobs:
           fi
           echo "sha=$PREV_SHA" >> "$GITHUB_OUTPUT"
 
-      - name: Open notification issue
+      - name: Analyze diff with Claude
+        id: analyze
         if: steps.upstream.outputs.sha != steps.prev.outputs.sha && steps.prev.outputs.sha != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          PREV_SHA: ${{ steps.prev.outputs.sha }}
+          NEW_SHA: ${{ steps.upstream.outputs.sha }}
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/analyze_upstream_diff.py
+
+      - name: Commit analysis bookkeeping (health state + audit log)
+        if: steps.analyze.outcome == 'success'
+        # continue-on-error: a transient push race on this bookkeeping
+        # commit must never suppress the actual notification Issue below
+        # (which only depends on steps.analyze.outputs.important, not on
+        # this step's success) or block state advancement later in the job.
+        # The retry loop below is the primary defense against losing an
+        # audit-log entry to a push race; continue-on-error is the fallback
+        # if all retries are exhausted.
+        continue-on-error: true
+        env:
+          HEALTH_MUTATION: ${{ steps.analyze.outputs.health_mutation }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Capture the one audit-log line this run just appended (if any),
+          # so it can be re-applied verbatim after a reset+retry without
+          # re-invoking analyze_upstream_diff.py -- that would mean a
+          # second real Claude API call, which must never happen as a side
+          # effect of a git push retry.
+          AUDIT_LINE=""
+          if [ -s "$AUDIT_LOG_FILE" ]; then
+            AUDIT_LINE=$(tail -n 1 "$AUDIT_LOG_FILE")
+          fi
+
+          git add "$HEALTH_STATE_FILE" "$AUDIT_LOG_FILE"
+          if git diff --cached --quiet; then
+            echo "No analysis bookkeeping change to commit"
+            exit 0
+          fi
+          git commit -m "chore: record Claude analysis outcome [skip ci]"
+
+          for attempt in 1 2 3 4 5; do
+            if git push; then
+              exit 0
+            fi
+            echo "push failed (attempt $attempt/5); fetching the fresh base and re-deriving bookkeeping" >&2
+            # Deliberately git reset --hard (not rebase): a textual rebase
+            # of a stale counter-file edit onto a moved base can conflict
+            # even when the two writers' intent doesn't actually conflict
+            # (verified by direct test against a simulated concurrent
+            # write). Discarding and re-deriving the mutation fresh from
+            # whatever is now on the remote is correct and safe because
+            # bump_health_state.py never calls Claude or any paid API.
+            git fetch origin "$GITHUB_REF_NAME"
+            git reset --hard "origin/$GITHUB_REF_NAME"
+            python3 .github/scripts/bump_health_state.py "$HEALTH_MUTATION"
+            if [ -n "$AUDIT_LINE" ]; then
+              echo "$AUDIT_LINE" >> "$AUDIT_LOG_FILE"
+            fi
+            git add "$HEALTH_STATE_FILE" "$AUDIT_LOG_FILE"
+            if git diff --cached --quiet; then
+              echo "Nothing to recommit after resync"
+              exit 0
+            fi
+            git commit -m "chore: record Claude analysis outcome [skip ci]"
+          done
+          echo "Giving up on bookkeeping commit after 5 attempts; audit-log entry for this run was NOT pushed." >&2
+          exit 1
+
+      - name: Open notification issue
+        if: steps.upstream.outputs.sha != steps.prev.outputs.sha && steps.prev.outputs.sha != '' && steps.analyze.outputs.important == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           COMMIT_MESSAGE: ${{ steps.upstream.outputs.message }}
@@ -78,43 +164,86 @@ jobs:
           NEW_DATE: ${{ steps.upstream.outputs.date }}
           NEW_AUTHOR: ${{ steps.upstream.outputs.author }}
           PREV_SHA: ${{ steps.prev.outputs.sha }}
+          CATEGORIES: ${{ steps.analyze.outputs.categories }}
+          IMPLEMENTED_STATUS: ${{ steps.analyze.outputs.implemented_status }}
+          CONFIDENCE: ${{ steps.analyze.outputs.confidence }}
+          SUMMARY_JA: ${{ steps.analyze.outputs.summary_ja }}
+          BEFORE_AFTER_JA: ${{ steps.analyze.outputs.before_after_ja }}
+          IMPACT_ON_POSTING_JA: ${{ steps.analyze.outputs.impact_on_posting_ja }}
+          RECOMMENDED_ACTION_JA: ${{ steps.analyze.outputs.recommended_action_ja }}
+          CONFIRMED_FACTS_JA: ${{ steps.analyze.outputs.confirmed_facts_ja }}
+          INFERENCE_JA: ${{ steps.analyze.outputs.inference_ja }}
         run: |
           set -euo pipefail
-          DETECTED_AT_JST=$(TZ=Asia/Tokyo date +"%Y-%m-%d %H:%M:%S JST")
-          COMPARE_URL="https://github.com/${UPSTREAM_REPO}/compare/${PREV_SHA}...${NEW_SHA}"
+          export DETECTED_AT_JST=$(TZ=Asia/Tokyo date +"%Y-%m-%d %H:%M:%S JST")
+          python3 .github/scripts/open_notification_issue.py
 
-          BODY_FILE=$(mktemp)
-          {
-            echo "Upstream repository [\`${UPSTREAM_REPO}\`](https://github.com/${UPSTREAM_REPO}) has new commits since the last check."
-            echo
-            echo "**Detected at (JST):** ${DETECTED_AT_JST}"
-            echo "**Latest commit:** [${NEW_SHA}](${NEW_URL})"
-            echo "**Author:** ${NEW_AUTHOR}"
-            echo "**Date:** ${NEW_DATE}"
-            echo "**Diff since last check:** [compare ${PREV_SHA:0:7}...${NEW_SHA:0:7}](${COMPARE_URL})"
-            echo
-            echo "**Message:**"
-            echo '```'
-            echo "$COMMIT_MESSAGE"
-            echo '```'
-            echo
-            echo "> **Note:** This only means the upstream default branch has a new commit."
-            echo "> It does **not** by itself confirm that the X recommendation algorithm's actual ranking"
-            echo "> behavior changed (the commit could be docs/tests/CI-only). Check the compare link above"
-            echo "> to judge the real impact before assuming ranking logic changed."
-            echo
-            echo "See the [upstream README's Notable Updates section](https://github.com/${UPSTREAM_REPO}#notable-updates) for a human-readable changelog."
-            echo
-            echo "---"
-            echo "_Opened automatically by the [Notify on X Algorithm Update](../actions/workflows/notify-upstream-update.yml) workflow._"
-          } > "$BODY_FILE"
+      - name: Record monitoring failure
+        if: failure() && steps.analyze.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ALERT_THRESHOLD: "3"
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          gh issue create \
-            --title "🔔 X algorithm updated upstream ($(date -u +%Y-%m-%d))" \
-            --body-file "$BODY_FILE"
+          python3 .github/scripts/record_monitor_failure.py
+          git add "$HEALTH_STATE_FILE"
+          if git diff --cached --quiet; then
+            echo "No health-state change to commit"
+            exit 0
+          fi
+          git commit -m "chore: record Claude analysis failure [skip ci]"
+
+          # A lost push here would silently under-count
+          # consecutive_claude_failures on the next run, delaying or
+          # skipping the alert threshold -- but a textual rebase of a
+          # stale counter-file edit onto a moved base can conflict even
+          # when the two writers' intent doesn't actually conflict
+          # (verified by direct test against a simulated concurrent
+          # write). So: discard (--hard reset, never rebase) and re-run
+          # the script fresh against whatever is actually on the remote.
+          # This is safe to repeat: the increment is always relative to
+          # the current on-disk value, and the alert Issue/comment this
+          # script creates is itself idempotent (finds-or-creates-or-
+          # comments), so retrying here cannot create a duplicate alert.
+          for attempt in 1 2 3 4 5; do
+            if git push; then
+              exit 0
+            fi
+            echo "push failed (attempt $attempt/5); fetching the fresh base and re-deriving the failure count" >&2
+            git fetch origin "$GITHUB_REF_NAME"
+            git reset --hard "origin/$GITHUB_REF_NAME"
+            python3 .github/scripts/record_monitor_failure.py
+            git add "$HEALTH_STATE_FILE"
+            if git diff --cached --quiet; then
+              echo "Nothing to recommit after resync"
+              exit 0
+            fi
+            git commit -m "chore: record Claude analysis failure [skip ci]"
+          done
+          echo "Giving up on failure-counter commit after 5 attempts." >&2
+          exit 1
 
       - name: Save latest seen commit
-        if: steps.upstream.outputs.sha != steps.prev.outputs.sha
+        # success() is required explicitly here: once a step has its own
+        # `if:`, GitHub Actions does NOT implicitly AND in success() the way
+        # it would if the `if:` were omitted entirely. Without it, ANY
+        # failure earlier in the job (the analyze step failing outright for
+        # any reason -- API outage, schema violation, or the budget-alert
+        # Issue-creation failure -- or the real notification-Issue creation
+        # failing) would still leave filter_stage unset/non-'budget_circuit_
+        # breaker' and let this step advance upstream-state.json anyway,
+        # silently marking an update "seen" that was never actually
+        # analyzed or never actually surfaced to a human. Also excludes the
+        # budget_circuit_breaker case on its own merits: a budget-skipped
+        # commit must NOT be recorded as seen, so that once the monthly
+        # budget resets, the next run's SHA comparison still finds it "new"
+        # and automatically retries analysis instead of permanently losing
+        # the chance (see write_filter_stage_output in
+        # analyze_upstream_diff.py).
+        if: success() && steps.upstream.outputs.sha != steps.prev.outputs.sha && steps.analyze.outputs.filter_stage != 'budget_circuit_breaker'
         run: |
           mkdir -p "$(dirname "$STATE_FILE")"
           jq -n \
@@ -126,11 +255,55 @@ jobs:
             > "$STATE_FILE"
 
       - name: Commit updated state
-        if: steps.upstream.outputs.sha != steps.prev.outputs.sha
+        # See the "Save latest seen commit" step above for why success()
+        # must be explicit here too.
+        if: success() && steps.upstream.outputs.sha != steps.prev.outputs.sha && steps.analyze.outputs.filter_stage != 'budget_circuit_breaker'
+        env:
+          NEW_SHA: ${{ steps.upstream.outputs.sha }}
+          NEW_URL: ${{ steps.upstream.outputs.url }}
+          NEW_DATE: ${{ steps.upstream.outputs.date }}
         run: |
+          set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add "$STATE_FILE"
-          git diff --cached --quiet && echo "No state change to commit" && exit 0
+          if git diff --cached --quiet; then
+            echo "No state change to commit"
+            exit 0
+          fi
           git commit -m "chore: record latest seen upstream commit [skip ci]"
-          git push
+
+          # Retry on push failure: if this push is lost, upstream-state.json
+          # keeps pointing at the OLD sha while the real upstream HEAD has
+          # already advanced. The next scheduled run would then see the
+          # same "new" sha again and re-run Claude (a second real API
+          # call, unavoidable since state didn't advance). That re-run
+          # would NOT create a duplicate notification Issue even if
+          # important again: open_notification_issue.py searches for an
+          # existing Issue carrying this exact sha's marker before
+          # creating one. Regenerating $STATE_FILE is a pure function of
+          # steps.upstream outputs (no prior state to merge), so it's
+          # always safe to redo after a reset.
+          for attempt in 1 2 3 4 5; do
+            if git push; then
+              exit 0
+            fi
+            echo "push failed (attempt $attempt/5); fetching the fresh base and regenerating state" >&2
+            git fetch origin "$GITHUB_REF_NAME"
+            git reset --hard "origin/$GITHUB_REF_NAME"
+            jq -n \
+              --arg sha "$NEW_SHA" \
+              --arg url "$NEW_URL" \
+              --arg date "$NEW_DATE" \
+              --arg checked_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+              '{sha: $sha, url: $url, date: $date, checked_at: $checked_at}' \
+              > "$STATE_FILE"
+            git add "$STATE_FILE"
+            if git diff --cached --quiet; then
+              echo "Nothing to recommit after resync (remote already has this sha)"
+              exit 0
+            fi
+            git commit -m "chore: record latest seen upstream commit [skip ci]"
+          done
+          echo "Giving up on state commit after 5 attempts." >&2
+          exit 1
