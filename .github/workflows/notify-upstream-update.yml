@@ -9,6 +9,16 @@ on:
     - cron: "0 */6 * * *" # every 6 hours
   workflow_dispatch: {} # allow manual runs from the Actions tab
 
+# Serialize runs of this workflow. Without this, a manual workflow_dispatch
+# overlapping a scheduled run (or two scheduled runs if one runs long) can
+# race on the same git refs (upstream-state.json, monitor-health-state.json,
+# notify-audit-log.jsonl), causing a git push to fail non-fast-forward.
+# cancel-in-progress: false so an overlapping trigger queues instead of
+# killing an in-flight run partway through its Claude call / Issue creation.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
 permissions:
   contents: write
   issues: write
@@ -88,15 +98,34 @@ jobs:
         # commit must never suppress the actual notification Issue below
         # (which only depends on steps.analyze.outputs.important, not on
         # this step's success) or block state advancement later in the job.
+        # The retry loop below is the primary defense against losing an
+        # audit-log entry to a push race; continue-on-error is the fallback
+        # if all retries are exhausted.
         continue-on-error: true
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add "$HEALTH_STATE_FILE" "$AUDIT_LOG_FILE"
-          git diff --cached --quiet && echo "No analysis bookkeeping change to commit" && exit 0
+          if git diff --cached --quiet; then
+            echo "No analysis bookkeeping change to commit"
+            exit 0
+          fi
           git commit -m "chore: record Claude analysis outcome [skip ci]"
-          git push
+          for attempt in 1 2 3 4 5; do
+            if git push; then
+              exit 0
+            fi
+            echo "push failed (attempt $attempt/5); fetching and rebasing onto the latest remote commit" >&2
+            git fetch origin "$GITHUB_REF_NAME"
+            if ! git rebase "origin/$GITHUB_REF_NAME"; then
+              git rebase --abort
+              echo "Rebase conflict while retrying the bookkeeping commit; giving up. Audit-log entry for this run was NOT pushed." >&2
+              exit 1
+            fi
+          done
+          echo "Giving up on bookkeeping commit after 5 attempts; audit-log entry for this run was NOT pushed." >&2
+          exit 1
 
       - name: Open notification issue
         if: steps.upstream.outputs.sha != steps.prev.outputs.sha && steps.prev.outputs.sha != '' && steps.analyze.outputs.important == 'true'
@@ -154,9 +183,13 @@ jobs:
             echo "${SUMMARY_JA}"
             echo
             echo "**コミットメッセージ:**"
-            echo '```'
+            # 4-backtick fence: COMMIT_MESSAGE is untrusted external content
+            # (the upstream committer controls it) and could itself contain
+            # a 3-backtick sequence that would otherwise break out of the
+            # code block and let it render as arbitrary Markdown.
+            echo '````'
             echo "$COMMIT_MESSAGE"
-            echo '```'
+            echo '````'
             echo
             echo "> **注意:** これはコミットが検知されたことを示すものであり、Xの推薦アルゴリズムの実際の挙動が"
             echo "> 変わったことを保証するものではありません。上記のcompareリンクで実際の差分を確認してください。"
@@ -182,9 +215,32 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add "$HEALTH_STATE_FILE"
-          git diff --cached --quiet && echo "No health-state change to commit" && exit 0
+          if git diff --cached --quiet; then
+            echo "No health-state change to commit"
+            exit 0
+          fi
           git commit -m "chore: record Claude analysis failure [skip ci]"
-          git push
+          # Retry with rebase (never --hard reset, which would discard the
+          # commit): a lost push here would silently under-count
+          # consecutive_claude_failures on the next run, delaying or
+          # skipping the alert threshold. The Issue/comment above this was
+          # already created for real via the GitHub API if the threshold
+          # was crossed, independent of whether this commit's push
+          # succeeds; this loop only protects the counter's persistence.
+          for attempt in 1 2 3 4 5; do
+            if git push; then
+              exit 0
+            fi
+            echo "push failed (attempt $attempt/5); fetching and rebasing onto the latest remote commit" >&2
+            git fetch origin "$GITHUB_REF_NAME"
+            if ! git rebase "origin/$GITHUB_REF_NAME"; then
+              git rebase --abort
+              echo "Rebase conflict while retrying the failure-counter commit; giving up." >&2
+              exit 1
+            fi
+          done
+          echo "Giving up on failure-counter commit after 5 attempts." >&2
+          exit 1
 
       - name: Save latest seen commit
         if: steps.upstream.outputs.sha != steps.prev.outputs.sha
