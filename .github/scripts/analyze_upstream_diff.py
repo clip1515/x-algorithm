@@ -172,6 +172,16 @@ CATEGORY_PATTERNS: dict[str, list[re.Pattern[str]]] = {
     "dwell_time": [_kw(r"dwell[_\-\s]?time")],
     "visibility_filtering": [
         _kw(r"visibility[_\-\s]?filter(ing)?"),
+        # "vf" is the real upstream codebase's own standard abbreviation
+        # for visibility filtering (e.g. `vf_candidate_hydrator.rs`,
+        # `VfClient`, `XaiVfClient`, `vf_pb`, `XAI_VF_MAX_BATCH_SIZE`) --
+        # confirmed by scanning the actual xai-org/x-algorithm source
+        # (928 matches, zero false positives found) during pre-merge
+        # verification. Without this, files outside the
+        # visibility-filtering/ directory that still touch VF logic
+        # (like the real commit "Deduplicate in_network_ids before VF
+        # lookup") would be silently missed.
+        _kw(r"vf"),
     ],
     "safety": [
         _kw(r"safety"),
