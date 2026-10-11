@@ -1,0 +1,142 @@
+name: "[TEST] Notify workflow verification (temporary, do not merge)"
+
+# TEMPORARY, ISOLATED TEST HARNESS.
+# This workflow exists only on the test/notify-workflow-verification branch to
+# verify the behavior of notify-upstream-update.yml without touching
+# production state (.github/upstream-state.json) or creating real Issues.
+# It uses its own state file and mocks the "gh issue create" call.
+# This branch and file are deleted after verification; never merge this.
+
+on:
+  workflow_dispatch:
+    inputs:
+      seed_prev_sha:
+        description: "Force this value into the TEST state file before running (leave empty to reuse existing test state)"
+        required: false
+        default: ""
+      fail_issue_create:
+        description: "Simulate an Issue-creation API failure (true/false)"
+        required: false
+        default: "false"
+
+permissions:
+  contents: write
+  issues: write
+
+env:
+  UPSTREAM_REPO: xai-org/x-algorithm
+  STATE_FILE: .github/test-upstream-state.json # TEST-ONLY file, never the production state file
+
+jobs:
+  check-upstream:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: "(TEST SETUP) Seed previous SHA"
+        if: inputs.seed_prev_sha != ''
+        run: |
+          set -euo pipefail
+          mkdir -p "$(dirname "$STATE_FILE")"
+          jq -n --arg sha "${{ inputs.seed_prev_sha }}" \
+            '{sha: $sha, url: "test-seed", date: "test-seed", checked_at: "test-seed"}' \
+            > "$STATE_FILE"
+          git config user.name "test-harness"
+          git config user.email "test-harness@example.invalid"
+          git add "$STATE_FILE"
+          git diff --cached --quiet && echo "no seed change" && exit 0
+          git commit -m "test: seed prev sha for verification [skip ci]"
+          git push
+
+      - name: Fetch latest upstream commit
+        id: upstream
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          RESP=$(curl -sS -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${UPSTREAM_REPO}/commits?per_page=1")
+
+          SHA=$(echo "$RESP" | jq -r '.[0].sha')
+          URL=$(echo "$RESP" | jq -r '.[0].html_url')
+          DATE=$(echo "$RESP" | jq -r '.[0].commit.author.date')
+          AUTHOR=$(echo "$RESP" | jq -r '.[0].commit.author.name')
+
+          if [ -z "$SHA" ] || [ "$SHA" = "null" ]; then
+            echo "Failed to read latest upstream commit" >&2
+            exit 1
+          fi
+
+          {
+            echo "sha=$SHA"
+            echo "url=$URL"
+            echo "date=$DATE"
+            echo "author=$AUTHOR"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "message<<MSG_EOF"
+            echo "$RESP" | jq -r '.[0].commit.message'
+            echo "MSG_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Read previously seen commit (test state)
+        id: prev
+        run: |
+          set -euo pipefail
+          if [ -f "$STATE_FILE" ]; then
+            PREV_SHA=$(jq -r '.sha // empty' "$STATE_FILE")
+          else
+            PREV_SHA=""
+          fi
+          echo "sha=$PREV_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: "(MOCK) Open notification issue"
+        if: steps.upstream.outputs.sha != steps.prev.outputs.sha && steps.prev.outputs.sha != ''
+        env:
+          COMMIT_MESSAGE: ${{ steps.upstream.outputs.message }}
+        run: |
+          set -euo pipefail
+          TITLE="🔔 X algorithm updated upstream ($(date -u +%Y-%m-%d))"
+          DETECTED_AT_JST=$(TZ=Asia/Tokyo date +"%Y-%m-%d %H:%M:%S JST")
+          echo "===== MOCK gh issue create (no real GitHub API call made) ====="
+          echo "title=$TITLE"
+          echo "detected_at_jst=$DETECTED_AT_JST"
+          echo "sha=${{ steps.upstream.outputs.sha }}"
+          echo "url=${{ steps.upstream.outputs.url }}"
+          echo "date=${{ steps.upstream.outputs.date }}"
+          echo "author=${{ steps.upstream.outputs.author }}"
+          echo "prev_sha=${{ steps.prev.outputs.sha }}"
+          echo "message<<<"
+          echo "$COMMIT_MESSAGE"
+          echo ">>>"
+          echo "================================================================"
+          if [ "${{ inputs.fail_issue_create }}" = "true" ]; then
+            echo "Simulating Issue-creation API failure..." >&2
+            exit 1
+          fi
+          echo "(mock) issue creation would have succeeded"
+
+      - name: Save latest seen commit (test state)
+        if: steps.upstream.outputs.sha != steps.prev.outputs.sha
+        run: |
+          mkdir -p "$(dirname "$STATE_FILE")"
+          jq -n \
+            --arg sha "${{ steps.upstream.outputs.sha }}" \
+            --arg url "${{ steps.upstream.outputs.url }}" \
+            --arg date "${{ steps.upstream.outputs.date }}" \
+            --arg checked_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '{sha: $sha, url: $url, date: $date, checked_at: $checked_at}' \
+            > "$STATE_FILE"
+
+      - name: Commit updated test state
+        if: steps.upstream.outputs.sha != steps.prev.outputs.sha
+        run: |
+          git config user.name "test-harness"
+          git config user.email "test-harness@example.invalid"
+          git add "$STATE_FILE"
+          git diff --cached --quiet && echo "No state change to commit" && exit 0
+          git commit -m "test: record latest seen upstream commit (test harness) [skip ci]"
+          git push
