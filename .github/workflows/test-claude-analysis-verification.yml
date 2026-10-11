@@ -158,6 +158,19 @@ jobs:
 
       - name: Commit health-state after failure handling
         if: failure() && steps.analyze.outcome == 'failure'
+        # GH_TOKEN must be set here too (not just on "Record monitoring
+        # failure" above): the retry loop below re-invokes
+        # mock_failure_test.py, which imports record_monitor_failure.py,
+        # which reads GH_TOKEN at module import time. Found the hard way:
+        # under the item-7 concurrency test, two runs landed close enough
+        # that this step's first push attempt lost a race and fell into
+        # the retry path, where it crashed with KeyError('GH_TOKEN')
+        # instead of correctly retrying. Production's equivalent step
+        # ("Record monitoring failure" in notify-upstream-update.yml) was
+        # never split into two steps like this, so it already carries
+        # GH_TOKEN through its own retry loop and does not have this bug.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           git config user.name "test-harness"
