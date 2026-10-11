@@ -1,0 +1,8 @@
+{
+  "html_url": "https://github.com/xai-org/x-algorithm/compare/eee...fff",
+  "total_commits": 1,
+  "commits": [{}],
+  "files": [
+    {"filename": "src/utils/parser.rs", "status": "modified", "patch": "+ fn parse_input() {}"}
+  ]
+}

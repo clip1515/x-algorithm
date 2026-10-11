@@ -1,0 +1,9 @@
+{
+  "html_url": "https://github.com/xai-org/x-algorithm/compare/aaa...bbb",
+  "total_commits": 2,
+  "commits": [{}, {}],
+  "files": [
+    {"filename": "README.md", "status": "modified", "patch": "+ some doc change"},
+    {"filename": ".github/workflows/ci.yml", "status": "modified", "patch": "+ ci tweak"}
+  ]
+}

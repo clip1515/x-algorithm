@@ -1,0 +1,8 @@
+{
+  "html_url": "https://github.com/xai-org/x-algorithm/compare/ccc...ddd",
+  "total_commits": 1,
+  "commits": [{}],
+  "files": [
+    {"filename": "src/ranking/phoenix_scorer.rs", "status": "modified", "patch": "+ phoenix_boost_weight = 1.2;\n+ // gated behind feature_flag_v2"}
+  ]
+}

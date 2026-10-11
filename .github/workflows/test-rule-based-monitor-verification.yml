@@ -1,0 +1,187 @@
+name: "[TEST] Rule-based monitor verification (temporary, do not merge)"
+
+# TEMPORARY, ISOLATED TEST HARNESS for the free, rule-based replacement of
+# the Claude-based analysis step. Mirrors the relevant steps of
+# notify-upstream-update.yml but:
+#   - uses test-only state/health/audit files under .github/test-fixtures/
+#     (never the production .github/upstream-state.json etc.)
+#   - mocks the compare API via MOCK_COMPARE_RESPONSE_FILE
+#   - mocks `gh issue create` (no real Issue is ever created)
+#   - hardcodes PREV_SHA/NEW_SHA per scenario instead of re-deriving them,
+#     since the dedup/fetch logic itself was already verified separately
+#     (PR #4) and is unchanged here.
+# Edit the env block below and push to re-run a different scenario.
+
+on:
+  push:
+    branches:
+      - test/rule-based-monitor-verification
+
+permissions:
+  contents: write
+
+env:
+  UPSTREAM_REPO: xai-org/x-algorithm
+  HEALTH_STATE_FILE: .github/test-fixtures/health-state.json
+  AUDIT_LOG_FILE: .github/test-fixtures/audit-log.jsonl
+  PREV_SHA: "aaaa111111111111111111111111111111111a"
+  NEW_SHA: "bbbb222222222222222222222222222222222b"
+  MOCK_COMPARE_RESPONSE_FILE: .github/test-fixtures/compare_phoenix.json
+  MOCK_SKIP_GH_ISSUE_CALLS: "true"
+  SCENARIO_LABEL: "A-phoenix-category-match"
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Reset test fixture state for this scenario
+        run: |
+          set -euo pipefail
+          echo "Running scenario: $SCENARIO_LABEL"
+          mkdir -p .github/test-fixtures
+          touch "$AUDIT_LOG_FILE"
+
+      - name: Analyze diff (free, rule-based -- no paid API)
+        id: analyze
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/analyze_upstream_diff.py
+
+      - name: Commit analysis bookkeeping (health state + audit log)
+        if: steps.analyze.outcome == 'success'
+        continue-on-error: true
+        env:
+          HEALTH_MUTATION: ${{ steps.analyze.outputs.health_mutation }}
+        run: |
+          set -euo pipefail
+          git config user.name "test-harness"
+          git config user.email "test-harness@example.invalid"
+
+          AUDIT_LINE=""
+          if [ -s "$AUDIT_LOG_FILE" ]; then
+            AUDIT_LINE=$(tail -n 1 "$AUDIT_LOG_FILE")
+          fi
+
+          git add "$HEALTH_STATE_FILE" "$AUDIT_LOG_FILE"
+          if git diff --cached --quiet; then
+            echo "No analysis bookkeeping change to commit"
+            exit 0
+          fi
+          git commit -m "test: record analysis outcome ($SCENARIO_LABEL) [skip ci]"
+
+          for attempt in 1 2 3 4 5; do
+            if git push; then
+              exit 0
+            fi
+            echo "push failed (attempt $attempt/5); fetching the fresh base and re-deriving bookkeeping" >&2
+            git fetch origin "$GITHUB_REF_NAME"
+            git reset --hard "origin/$GITHUB_REF_NAME"
+            python3 .github/scripts/bump_health_state.py "$HEALTH_MUTATION"
+            if [ -n "$AUDIT_LINE" ]; then
+              echo "$AUDIT_LINE" >> "$AUDIT_LOG_FILE"
+            fi
+            git add "$HEALTH_STATE_FILE" "$AUDIT_LOG_FILE"
+            if git diff --cached --quiet; then
+              echo "Nothing to recommit after resync"
+              exit 0
+            fi
+            git commit -m "test: record analysis outcome ($SCENARIO_LABEL) [skip ci]"
+          done
+          echo "Giving up on bookkeeping commit after 5 attempts." >&2
+          exit 1
+
+      - name: "(MOCK) Open notification issue"
+        if: steps.analyze.outputs.important == 'true'
+        env:
+          CATEGORIES: ${{ steps.analyze.outputs.categories }}
+          IMPLEMENTED_STATUS: ${{ steps.analyze.outputs.implemented_status }}
+          CONFIDENCE: ${{ steps.analyze.outputs.confidence }}
+          SUMMARY_JA: ${{ steps.analyze.outputs.summary_ja }}
+          BEFORE_AFTER_JA: ${{ steps.analyze.outputs.before_after_ja }}
+          IMPACT_ON_POSTING_JA: ${{ steps.analyze.outputs.impact_on_posting_ja }}
+          RECOMMENDED_ACTION_JA: ${{ steps.analyze.outputs.recommended_action_ja }}
+          CONFIRMED_FACTS_JA: ${{ steps.analyze.outputs.confirmed_facts_ja }}
+          INFERENCE_JA: ${{ steps.analyze.outputs.inference_ja }}
+        run: |
+          set -euo pipefail
+          echo "===== MOCK gh issue create (no real API call made) ====="
+          echo "categories=$CATEGORIES"
+          echo "implemented_status=$IMPLEMENTED_STATUS"
+          echo "confidence=$CONFIDENCE"
+          echo "summary_ja=$SUMMARY_JA"
+          echo "before_after_ja=$BEFORE_AFTER_JA"
+          echo "impact_on_posting_ja=$IMPACT_ON_POSTING_JA"
+          echo "recommended_action_ja=$RECOMMENDED_ACTION_JA"
+          echo "confirmed_facts_ja=$CONFIRMED_FACTS_JA"
+          echo "inference_ja=$INFERENCE_JA"
+          echo "=========================================================="
+          echo "(mock) issue creation would have succeeded"
+
+      - name: Record monitoring failure
+        if: failure() && steps.analyze.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ALERT_THRESHOLD: "3"
+        run: |
+          set -euo pipefail
+          echo "===== MOCK alert issue creation (record_monitor_failure.py GitHub calls stubbed) ====="
+          python3 .github/test-fixtures/mock_failure_test.py
+
+      - name: Commit health-state after failure handling
+        if: failure() && steps.analyze.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git config user.name "test-harness"
+          git config user.email "test-harness@example.invalid"
+          git add "$HEALTH_STATE_FILE"
+          if git diff --cached --quiet; then
+            echo "No health-state change to commit"
+            exit 0
+          fi
+          git commit -m "test: record analysis failure ($SCENARIO_LABEL) [skip ci]"
+
+          for attempt in 1 2 3 4 5; do
+            if git push; then
+              exit 0
+            fi
+            echo "push failed (attempt $attempt/5); fetching the fresh base and re-deriving the failure count" >&2
+            git fetch origin "$GITHUB_REF_NAME"
+            git reset --hard "origin/$GITHUB_REF_NAME"
+            python3 .github/test-fixtures/mock_failure_test.py
+            git add "$HEALTH_STATE_FILE"
+            if git diff --cached --quiet; then
+              echo "Nothing to recommit after resync"
+              exit 0
+            fi
+            git commit -m "test: record analysis failure ($SCENARIO_LABEL) [skip ci]"
+          done
+          echo "Giving up on failure-counter commit after 5 attempts." >&2
+          exit 1
+
+      - name: "(TEST) Simulate state advancement"
+        # Mirrors production's "Save latest seen commit"/"Commit updated
+        # state" gating: success() only -- there is no budget_circuit_
+        # breaker filter_stage anymore (no budget to protect), so nothing
+        # else needs to block advancement here.
+        if: success()
+        run: |
+          set -euo pipefail
+          echo "{\"sha\": \"$NEW_SHA\"}" > .github/test-fixtures/simulated-state.json
+          echo "State WOULD advance to $NEW_SHA (filter_stage=${{ steps.analyze.outputs.filter_stage }})"
+
+      - name: Report important flag (for log inspection)
+        if: always()
+        run: |
+          echo "analyze.outcome=${{ steps.analyze.outcome }}"
+          echo "analyze.outputs.important=${{ steps.analyze.outputs.important }}"
+          echo "analyze.outputs.categories=${{ steps.analyze.outputs.categories }}"
+          echo "analyze.outputs.implemented_status=${{ steps.analyze.outputs.implemented_status }}"
+          echo "analyze.outputs.confidence=${{ steps.analyze.outputs.confidence }}"
+          echo "analyze.outputs.filter_stage=${{ steps.analyze.outputs.filter_stage }}"
