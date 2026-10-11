@@ -27,7 +27,7 @@ env:
   MOCK_COMPARE_RESPONSE_FILE: .github/test-fixtures/compare_nontrivial.json
   MOCK_ANTHROPIC_RESPONSE_FILE: .github/test-fixtures/claude_bad_schema.json
   MONTHLY_CALL_LIMIT: "50"
-  SCENARIO_LABEL: "C-claude-failure-1"
+  SCENARIO_LABEL: "C-claude-failure-2"
 
 jobs:
   verify:
