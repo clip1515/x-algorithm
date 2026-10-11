@@ -142,17 +142,19 @@ RESULT_SCHEMA = {
 # that treat any non-letter (underscore, hyphen, digit, slash, whitespace,
 # punctuation) as a valid edge, while still rejecting a match that's really
 # the middle of a different identifier (e.g. "phoenixfoo" or "xphoenix"):
-#   _LB  no letter immediately before the match
+#   _LB  no letter immediately before the match, OR the match sits at a
+#        lowercase->uppercase "hump" (so a short term embedded mid-compound
+#        in PascalCase, like `Vf` inside `XaiVfClient`, still matches)
 #   _RB  no LOWERCASE letter immediately after (an uppercase letter is
 #        allowed through, so PascalCase/camelCase like `PhoenixScorer`
 #        still matches `phoenix` at its start)
+# (?-i:...) below scopes case-SENSITIVITY back on for just that character
+# class, overriding the pattern's own re.IGNORECASE -- otherwise IGNORECASE
+# would make [a-z]/[A-Z] match both cases, defeating the whole point of
+# telling PascalCase/camelCase boundaries apart from a same-case run-on.
 # ---------------------------------------------------------------------------
 
-_LB = r"(?<![A-Za-z])"
-# (?-i:[a-z]) scopes case-SENSITIVITY back on for just this character class,
-# overriding the pattern's own re.IGNORECASE -- otherwise IGNORECASE would
-# make [a-z] match uppercase too, and this boundary would reject the valid
-# PascalCase/camelCase continuation (e.g. "PhoenixScorer") it's meant to allow.
+_LB = r"(?:(?<![A-Za-z])|(?<=(?-i:[a-z]))(?=(?-i:[A-Z])))"
 _RB = r"(?!(?-i:[a-z]))"
 
 
