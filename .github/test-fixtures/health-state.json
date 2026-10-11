@@ -1,6 +1,6 @@
 {
   "consecutive_claude_failures": 1,
-  "calls_this_month": 3,
+  "calls_this_month": 0,
   "budget_month": "2026-10",
   "last_success_at": "2026-10-11T02:01:02Z",
   "last_failure_at": "2026-10-11T04:45:13Z",

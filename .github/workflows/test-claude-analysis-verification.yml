@@ -23,18 +23,19 @@ env:
   HEALTH_STATE_FILE: .github/test-fixtures/health-state.json
   AUDIT_LOG_FILE: .github/test-fixtures/audit-log.jsonl
   PREV_SHA: "eeee555555555555555555555555555555555e"
-  NEW_SHA: "bbbb999999999999999999999999999999999b"
+  NEW_SHA: "cccc000000000000000000000000000000000c"
   MOCK_COMPARE_RESPONSE_FILE: .github/test-fixtures/compare_nontrivial.json
-  MOCK_ANTHROPIC_RESPONSE_FILE: .github/test-fixtures/claude_ok.json
-  # Deliberately NOT set this time: the real (unmocked) budget-exhaustion
-  # alert Issue-creation path must run and be observed to fail, since this
-  # workflow's `permissions:` block below grants only `contents: write`
-  # (no `issues: write`), so the real `gh_api` POST inside
-  # alert_budget_exhausted_once() should get HTTP 403 -- proving item 2:
-  # an alert-Issue-creation failure must fail the job, not be treated as
-  # success.
+  # Deliberately schema-invalid (missing required fields inference_ja and
+  # confidence): proves the item 3 success() fix also covers the generic
+  # "Claude call succeeded transport-wise but the response was bad" case,
+  # not just the budget-circuit-breaker path tested in scenario J.
+  # validate_schema() should raise AnalysisError -> exit 1, and this run's
+  # health-state.json already has calls_this_month=0 so it will NOT hit
+  # the budget breaker and will reach call_claude()/validate_schema() for
+  # real.
+  MOCK_ANTHROPIC_RESPONSE_FILE: .github/test-fixtures/claude_malformed.json
   MONTHLY_CALL_LIMIT: "3"
-  SCENARIO_LABEL: "J-real-alert-issue-creation-failure-must-fail-job"
+  SCENARIO_LABEL: "K-schema-invalid-claude-response-must-fail-job-not-advance-state"
 
 jobs:
   verify:

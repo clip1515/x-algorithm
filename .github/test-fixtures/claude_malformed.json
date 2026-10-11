@@ -1,0 +1,10 @@
+{
+  "important": true,
+  "categories": ["engagement_weight"],
+  "implemented_status": "active_default",
+  "summary_ja": "重みの変更",
+  "before_after_ja": "変更前: 1.0 / 変更後: 1.5",
+  "impact_on_posting_ja": "エンゲージメントの影響が強まる可能性",
+  "recommended_action_ja": "投稿頻度を維持",
+  "confirmed_facts_ja": ["weightが1.0から1.5に変更された"]
+}
