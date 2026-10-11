@@ -14,6 +14,14 @@ on:
   push:
     branches:
       - test/claude-analysis-verification
+  workflow_dispatch: {} # temporary: lets item-7 (concurrency) be fired twice back-to-back via the API
+
+# Mirrors production's concurrency block exactly, so this test harness can
+# empirically prove item 7 (GitHub Actions concurrency control behaves as
+# expected) without touching the real notify-upstream-update.yml workflow.
+concurrency:
+  group: concurrency-test-${{ github.workflow }}
+  cancel-in-progress: false
 
 permissions:
   contents: write
@@ -43,6 +51,11 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: "(TEST item 7) Hold the job open so a second dispatch can be observed queuing"
+        run: |
+          echo "Sleeping 25s to widen the window for the concurrency test; irrelevant to all other scenarios."
+          sleep 25
 
       - name: Reset test fixture state for this scenario
         run: |
