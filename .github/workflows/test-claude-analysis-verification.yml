@@ -22,13 +22,13 @@ env:
   UPSTREAM_REPO: xai-org/x-algorithm
   HEALTH_STATE_FILE: .github/test-fixtures/health-state.json
   AUDIT_LOG_FILE: .github/test-fixtures/audit-log.jsonl
-  PREV_SHA: "aaaa111111111111111111111111111111111a"
-  NEW_SHA: "bbbb222222222222222222222222222222222b"
+  PREV_SHA: "cccc333333333333333333333333333333333c"
+  NEW_SHA: "dddd444444444444444444444444444444444d"
   MOCK_COMPARE_RESPONSE_FILE: .github/test-fixtures/compare_nontrivial.json
   MOCK_ANTHROPIC_RESPONSE_FILE: .github/test-fixtures/claude_ok.json
   MOCK_SKIP_GH_ISSUE_CALLS: "true"
-  MONTHLY_CALL_LIMIT: "50"
-  SCENARIO_LABEL: "G-regression-after-retry-fix"
+  MONTHLY_CALL_LIMIT: "3"
+  SCENARIO_LABEL: "H-budget-exhaustion-alert"
 
 jobs:
   verify:
