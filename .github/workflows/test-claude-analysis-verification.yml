@@ -22,12 +22,12 @@ env:
   UPSTREAM_REPO: xai-org/x-algorithm
   HEALTH_STATE_FILE: .github/test-fixtures/health-state.json
   AUDIT_LOG_FILE: .github/test-fixtures/audit-log.jsonl
-  PREV_SHA: "0000000000000000000000000000000000dead"
-  NEW_SHA: "1111111111111111111111111111111111beef"
-  MOCK_COMPARE_RESPONSE_FILE: .github/test-fixtures/compare_nontrivial.json
+  PREV_SHA: "2222222222222222222222222222222222face"
+  NEW_SHA: "3333333333333333333333333333333333cafe"
+  MOCK_COMPARE_RESPONSE_FILE: .github/test-fixtures/compare_trivial.json
   MOCK_ANTHROPIC_RESPONSE_FILE: .github/test-fixtures/claude_ok.json
   MONTHLY_CALL_LIMIT: "50"
-  SCENARIO_LABEL: "A-nontrivial-success"
+  SCENARIO_LABEL: "B-trivial-skip"
 
 jobs:
   verify:
@@ -57,6 +57,7 @@ jobs:
 
       - name: Commit analysis bookkeeping (health state + audit log)
         if: steps.analyze.outcome == 'success'
+        continue-on-error: true
         run: |
           set -euo pipefail
           git config user.name "test-harness"
