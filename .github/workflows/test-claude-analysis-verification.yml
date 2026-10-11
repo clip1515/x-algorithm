@@ -28,7 +28,7 @@ env:
   MOCK_ANTHROPIC_RESPONSE_FILE: .github/test-fixtures/claude_ok.json
   MOCK_SKIP_GH_ISSUE_CALLS: "true"
   MONTHLY_CALL_LIMIT: "3"
-  SCENARIO_LABEL: "H-budget-exhaustion-alert"
+  SCENARIO_LABEL: "H2-budget-exhaustion-alert-mocked-properly"
 
 jobs:
   verify:
