@@ -1,7 +1,5 @@
 {
-  "consecutive_claude_failures": 0,
-  "calls_this_month": 0,
-  "budget_month": "",
-  "last_success_at": null,
-  "last_failure_at": null
+  "last_success_at": "2026-10-13T13:14:28Z",
+  "last_failure_at": null,
+  "consecutive_analysis_failures": 0
 }
